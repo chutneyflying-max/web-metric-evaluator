@@ -1,0 +1,12 @@
+{
+  "name": "web-metric-evaluator",
+  "version": "1.0.0",
+  "description": "Automated web latency and endpoint metric collector",
+  "type": "module",
+  "scripts": {
+    "start": "node src/evaluator.js"
+  },
+  "dependencies": {
+    "playwright": "^1.49.0"
+  }
+}
