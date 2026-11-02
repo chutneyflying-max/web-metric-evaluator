@@ -1,0 +1,51 @@
+name: Network Metric Evaluator Pulse
+
+on:
+  schedule:
+    # Staggered offset schedule (runs at minute :04, :19, :34, :49)
+    - cron: '4,19,34,49 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: metric-evaluator-pulse
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: [1, 2, 3, 4]
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Cache Playwright Browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-browsers-${{ runner.os }}-${{ hashFiles('package.json') }}
+          restore-keys: |
+            playwright-browsers-${{ runner.os }}-
+
+      - name: Install Dependencies & Headless Browser
+        run: |
+          npm install
+          npx playwright install chromium --with-deps
+
+      - name: Run Availability Audit for Shard ${{ matrix.partition }}
+        env:
+          WP_ENDPOINT: ${{ secrets.WP_ENDPOINT }}
+          DOWNRADAR_INGEST_SECRET: ${{ secrets.DOWNRADAR_INGEST_SECRET }}
+          PARTITION_ID: ${{ matrix.partition }}
+          TOTAL_PARTITIONS: 4
+          TIME_WINDOW: 'now 1-H'
+        run: |
+          node src/evaluator.js
