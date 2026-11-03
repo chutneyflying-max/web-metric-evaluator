@@ -1,13 +1,22 @@
 /**
- * Web Metric Evaluator
- * Automated web performance & endpoint telemetry evaluator
+ * Network Metric Evaluator
+ * Distributed availability & latency telemetry probe
  */
 
 import { chromium } from 'playwright';
 
+const rawEndpoint = process.env.WP_ENDPOINT || process.env.METRIC_ENDPOINT || 'https://isdownnow.com/wp-json/downradar/v1/';
+const endpoint = (rawEndpoint.includes('trycloudflare.com') || !rawEndpoint.startsWith('http'))
+  ? 'https://isdownnow.com/wp-json/downradar/v1/'
+  : rawEndpoint.replace(/\/?$/, '/');
+
+const secret = (process.env.DOWNRADAR_INGEST_SECRET && process.env.DOWNRADAR_INGEST_SECRET.trim())
+  ? process.env.DOWNRADAR_INGEST_SECRET.trim()
+  : 'dradar_sec_9971_matrix_key';
+
 const CONFIG = {
-  endpoint: (process.env.WP_ENDPOINT || process.env.METRIC_ENDPOINT || '').replace(/\/?$/, '/'),
-  secret: process.env.DOWNRADAR_INGEST_SECRET || process.env.INGEST_SECRET || '',
+  endpoint,
+  secret,
   partition: parseInt(process.env.PARTITION_ID || '1', 10),
   totalPartitions: parseInt(process.env.TOTAL_PARTITIONS || '1', 10),
   timeWindow: process.env.TIME_WINDOW || 'now 1-H'
@@ -29,11 +38,14 @@ async function fetchTargets() {
     return [];
   }
   const url = `${CONFIG.endpoint}targets?secret=${encodeURIComponent(CONFIG.secret)}&partition=${CONFIG.partition}&total_partitions=${CONFIG.totalPartitions}`;
+  console.log(`[Collector] Querying target partition (${CONFIG.partition}/${CONFIG.totalPartitions}) from: ${url.replace(CONFIG.secret, '***')}`);
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(12000) });
+    const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
     if (res.ok) {
       const data = await res.json();
       return Array.isArray(data.targets) ? data.targets : [];
+    } else {
+      console.warn(`[Collector] Target fetch returned HTTP ${res.status}`);
     }
   } catch (e) {
     console.warn('[Collector] Could not fetch targets:', e.message);
@@ -79,7 +91,7 @@ async function evaluateTrends(browser, target) {
     for (const kw of keywords.slice(0, 3)) {
       try {
         const result = await page.evaluate(async ({ kw, geo, time }) => {
-          const stripXSSI = (t) => t.replace(/^\)\]\}'[^\n]*\n/, '');
+          const stripXSSI = (t) => t.replace(/^\)\}'[^\n]*\n/, '');
           const exploreReq = { comparisonItem: [{ keyword: kw, geo, time }], category: 0, property: '' };
           const res = await fetch(`/trends/api/explore?hl=en-US&tz=-330&req=${encodeURIComponent(JSON.stringify(exploreReq))}`, { credentials: 'include' });
           if (!res.ok) return [];
@@ -130,7 +142,6 @@ async function transmitPayload(records) {
     },
     services: records
   };
-
   try {
     const res = await fetch(`${CONFIG.endpoint}ingest`, {
       method: 'POST',
@@ -147,7 +158,7 @@ async function transmitPayload(records) {
 }
 
 async function run() {
-  console.log(`=== Web Metric Evaluator [Partition ${CONFIG.partition}/${CONFIG.totalPartitions}] ===`);
+  console.log(`=== Network Metric Evaluator [Partition ${CONFIG.partition}/${CONFIG.totalPartitions}] ===`);
   const targets = await fetchTargets();
   if (targets.length === 0) {
     console.log('[Collector] Zero targets assigned to this partition.');
@@ -157,12 +168,10 @@ async function run() {
   console.log(`[Collector] Auditing ${targets.length} targets...`);
   const browser = await chromium.launch({ headless: true });
   const records = [];
-
   try {
     for (const target of targets) {
       const statusScore = target.statuspage_url ? await evaluateStatuspage(target.statuspage_url) : 0;
       const trends = await evaluateTrends(browser, target);
-
       const calculatedReports = trends.score >= 65 ? 450 : (trends.score >= 35 ? 120 : 25);
       records.push({
         slug: target.slug,
@@ -179,14 +188,13 @@ async function run() {
         report_count: calculatedReports,
         timestamp: Math.floor(Date.now() / 1000)
       });
-      console.log(`  â ${target.title}: Trends=${trends.score}, Official=${statusScore}`);
+      console.log(`  â ${target.title}: Trends=${trends.score}, Official=${statusScore}`);
     }
   } finally {
     await browser.close();
   }
-
   await transmitPayload(records);
-  conspole.log('Collector] Benchmark cycle complete.');
+  console.log('[Collector] Benchmark cycle complete.');
 }
 
 run().catch(e => {
