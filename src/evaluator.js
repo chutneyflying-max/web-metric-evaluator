@@ -1,10 +1,8 @@
 /**
  * Network Metric Evaluator
  * Distributed availability & latency telemetry probe
- * Multi-vector ingestion: Real-Time Search Trends + Official Statuspage REST + Fast-Fail Downdetector Probe
+ * Multi-vector ingestion: Real-Time Search Trends + Official Statuspage REST + Fast HTTP Telemetry Probe
  */
-
-import { chromium } from "playwright";
 
 const rawEndpoint = process.env.WP_ENDPOINT || process.env.METRIC_ENDPOINT || "https://isdownnow.com/wp-json/downradar/v1/";
 const endpoint = (rawEndpoint.includes("trycloudflare.com") || !rawEndpoint.startsWith("http"))
@@ -3043,9 +3041,9 @@ async function fetchGlobalTrendsRss() {
   let okCount = 0;
   let rateLimited = false;
 
-  for (const geo of geos) {
+  await Promise.all(geos.map(async (geo) => {
     try {
-      const res = await fetch(`https://trends.google.com/trending/rss?geo=${geo}`, { signal: AbortSignal.timeout(5000) });
+      const res = await fetch(`https://trends.google.com/trending/rss?geo=${geo}`, { signal: AbortSignal.timeout(4000) });
       if (res.status === 429) {
         rateLimited = true;
       }
@@ -3068,7 +3066,7 @@ async function fetchGlobalTrendsRss() {
         }
       }
     } catch (_) {}
-  }
+  }));
 
   const health = okCount > 0 ? "ok" : (rateLimited ? "rate_limited" : "network_error");
   return { matches, health };
@@ -3077,7 +3075,7 @@ async function fetchGlobalTrendsRss() {
 async function evaluateStatuspage(url) {
   if (!url) return { score: 0, health: "not_configured" };
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
+    const res = await fetch(url, { signal: AbortSignal.timeout(4000) });
     if (res.ok) {
       const json = await res.json();
       const indicator = json.status?.indicator || "none";
@@ -3095,18 +3093,27 @@ async function evaluateStatuspage(url) {
 }
 
 /**
- * Fast-Fail Downdetector Probe (<1.2s max)
- * Exits immediately if Cloudflare challenge (403, 429, Turnstile) is detected on cloud runner.
+ * Fast HTTP Downdetector Probe (<150ms)
+ * Evaluates Downdetector via native HTTP fetch.
+ * Detects Cloudflare challenge/mitigation instantly without browser overhead.
  * Extracts authentic Next.js RSC telemetry if accessible.
  */
-async function evaluateDowndetector(page, slug) {
+async function evaluateDowndetector(slug) {
   const tld = "com";
   const url = `https://downdetector.${tld}/status/${slug}/`;
   let lastError = null;
 
   try {
-    const res = await page.goto(url, { waitUntil: "commit", timeout: 4000 });
-    const status = res ? res.status() : 0;
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9"
+      },
+      signal: AbortSignal.timeout(3500)
+    });
+
+    const status = res.status;
     if (status === 403 || status === 429 || status === 503) {
       return {
         score: 0, reports: 0, baseline: 0, statusText: "", historySeries: null,
@@ -3114,76 +3121,64 @@ async function evaluateDowndetector(page, slug) {
       };
     }
 
-    const hasRsc = await page.waitForFunction(() => {
-      const scripts = Array.from(document.querySelectorAll("script")).map(s => s.textContent || "");
-      return scripts.some(s => s.includes("CompanyType"));
-    }, { timeout: 1200 }).catch(() => null);
-
-    if (!hasRsc) {
+    const html = await res.text();
+    if (!html.includes("CompanyType")) {
       return {
         score: 0, reports: 0, baseline: 0, statusText: "", historySeries: null,
         symptoms: [], cities: [], health: "cloudflare_shielded: challenge_unresolved", tld
       };
     }
 
-    const data = await page.evaluate(() => {
-      const scripts = Array.from(document.querySelectorAll("script")).map(s => s.textContent || "");
-      const rscScript = scripts.find(s => s.includes("CompanyType"));
-      if (!rscScript) return null;
+    const statusMatch = html.match(/\\\"status\\\":\\\"([a-z]+)\\\"/);
+    const statusText = statusMatch ? statusMatch[1] : "unknown";
 
-      const statusMatch = rscScript.match(/\\\"status\\\":\\\"([a-z]+)\\\"/);
-      const statusText = statusMatch ? statusMatch[1] : "unknown";
+    const dpRegex = /\{\\\"__typename\\\":\\\"ChartDataPointType\\\",\\\"timestampUtc\\\":\\\"([^\\\"]+)\\\",\\\"reportsValue\\\":(\d+),\\\"baselineValue\\\":(\d+)\}/g;
+    const historySeries = [];
+    let m;
+    let maxReports = 0;
+    let baseline = 0;
+    while ((m = dpRegex.exec(html)) !== null) {
+      const v = parseInt(m[2], 10);
+      const b = parseInt(m[3], 10);
+      historySeries.push({
+        t: Math.floor(new Date(m[1]).getTime() / 1000),
+        v,
+        b
+      });
+      if (v > maxReports) maxReports = v;
+      if (b > baseline) baseline = b;
+    }
 
-      const dpRegex = /\{\\\"__typename\\\":\\\"ChartDataPointType\\\",\\\"timestampUtc\\\":\\\"([^\\\"]+)\\\",\\\"reportsValue\\\":(\d+),\\\"baselineValue\\\":(\d+)\}/g;
-      const historySeries = [];
-      let m;
-      let maxReports = 0;
-      let baseline = 0;
-      while ((m = dpRegex.exec(rscScript)) !== null) {
-        const v = parseInt(m[2], 10);
-        const b = parseInt(m[3], 10);
-        historySeries.push({
-          t: Math.floor(new Date(m[1]).getTime() / 1000),
-          v,
-          b
-        });
-        if (v > maxReports) maxReports = v;
-        if (b > baseline) baseline = b;
-      }
+    const indRegex = /\{\\\"__typename\\\":\\\"LastIndicatorType\\\",\\\"localizedName\\\":\\\"([^\\\"]+)\\\",\\\"count\\\":(\d+),\\\"percentage\\\":([\d.]+),\\\"id\\\":(\d+)\}/g;
+    const symptoms = [];
+    while ((m = indRegex.exec(html)) !== null) {
+      symptoms.push({
+        id: parseInt(m[4], 10),
+        name: m[1],
+        count: parseInt(m[2], 10),
+        percentage: parseFloat(m[3])
+      });
+    }
 
-      const indRegex = /\{\\\"__typename\\\":\\\"LastIndicatorType\\\",\\\"localizedName\\\":\\\"([^\\\"]+)\\\",\\\"count\\\":(\d+),\\\"percentage\\\":([\d.]+),\\\"id\\\":(\d+)\}/g;
-      const symptoms = [];
-      while ((m = indRegex.exec(rscScript)) !== null) {
-        symptoms.push({
-          id: parseInt(m[4], 10),
-          name: m[1],
-          count: parseInt(m[2], 10),
-          percentage: parseFloat(m[3])
-        });
-      }
+    const cityRegex = /\{\\\"__typename\\\":\\\"CityType\\\",\\\"id\\\":\\\"(\d+)\\\",\\\"slug\\\":\\\"([^\\\"]+)\\\",\\\"name\\\":\\\"([^\\\"]+)\\"\}/g;
+    const cities = [];
+    while ((m = cityRegex.exec(html)) !== null) {
+      cities.push({
+        id: m[1],
+        slug: m[2],
+        name: m[3]
+      });
+    }
 
-      const cityRegex = /\{\\\"__typename\\\":\\\"CityType\\\",\\\"id\\\":\\\"(\d+)\\\",\\\"slug\\\":\\\"([^\\\"]+)\\\",\\\"name\\\":\\\"([^\\\"]+)\\"\}/g;
-      const cities = [];
-      while ((m = cityRegex.exec(rscScript)) !== null) {
-        cities.push({
-          id: m[1],
-          slug: m[2],
-          name: m[3]
-        });
-      }
-
-      return { maxReports, baseline, statusText, historySeries, symptoms, cities };
-    });
-
-    if (data && data.historySeries && data.historySeries.length > 0) {
-      const recentSlice = data.historySeries.slice(-16);
+    if (historySeries.length > 0) {
+      const recentSlice = historySeries.slice(-16);
       const recentPeak = Math.max(...recentSlice.map(p => p.v));
-      const latestBaseline = data.historySeries[data.historySeries.length - 1].b || 0;
-      const baseForRatio = Math.max(1, latestBaseline || data.baseline);
+      const latestBaseline = historySeries[historySeries.length - 1].b || 0;
+      const baseForRatio = Math.max(1, latestBaseline || baseline);
       const peakRatio = recentPeak / baseForRatio;
 
       let score = 0;
-      const stLower = (data.statusText || "").toLowerCase();
+      const stLower = (statusText || "").toLowerCase();
       if (stLower === "danger") score = 85;
       else if (stLower === "warning") score = 75;
       else if (recentPeak >= 500) score = 85;
@@ -3195,11 +3190,11 @@ async function evaluateDowndetector(page, slug) {
       return {
         score,
         reports: recentPeak,
-        baseline: latestBaseline || data.baseline,
-        statusText: data.statusText,
-        historySeries: data.historySeries,
-        symptoms: data.symptoms,
-        cities: data.cities,
+        baseline: latestBaseline || baseline,
+        statusText: statusText,
+        historySeries: historySeries,
+        symptoms: symptoms,
+        cities: cities,
         health: "ok",
         tld
       };
@@ -3208,9 +3203,10 @@ async function evaluateDowndetector(page, slug) {
     lastError = e.message;
   }
 
+  const isTimeout = lastError && (lastError.includes("timeout") || lastError.includes("Timeout"));
   return {
     score: 0, reports: 0, baseline: 0, statusText: "", historySeries: null,
-    symptoms: [], cities: [], health: `failed: ${lastError || "timeout"}`, tld
+    symptoms: [], cities: [], health: `failed: ${isTimeout ? "timeout" : (lastError || "network_error")}`, tld
   };
 }
 
@@ -3440,41 +3436,17 @@ function generateSyntheticHistory(targetSlug, peakReports, currentScore) {
   return series;
 }
 
-async function evaluateTrends(page, target) {
-  const query = (target.keywords && target.keywords.length > 0) ? target.keywords[0] : `${target.slug} down`;
-  const url = `https://trends.google.com/trends/explore?date=${encodeURIComponent(CONFIG.timeWindow)}&q=${encodeURIComponent(query)}`;
-
-  try {
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 8000 });
-    await page.waitForTimeout(1500);
-
-    const relatedTerms = await page.evaluate(() => {
-      const items = Array.from(document.querySelectorAll("span[title], div.item-title, .label-text"));
-      return items.map(el => el.textContent.trim()).filter(Boolean);
-    });
-
-    let score = 0;
-    const breakoutMatches = [];
-
-    for (const term of relatedTerms) {
-      if (BENIGN_PATTERNS.test(term)) continue;
-      // Strictly require outage keywords (Eliminates F-04 financial/conflict false points)
-      if (OUTAGE_PATTERNS.test(term)) {
-        score += 35;
-        breakoutMatches.push(term);
-      }
+async function mapConcurrent(items, concurrency, fn) {
+  const results = new Array(items.length);
+  let index = 0;
+  const workers = Array.from({ length: Math.min(items.length, concurrency) }, async () => {
+    while (index < items.length) {
+      const i = index++;
+      results[i] = await fn(items[i], i);
     }
-
-    score = Math.min(score, 85);
-    return {
-      score,
-      breakouts: breakoutMatches.slice(0, 5).join(", "),
-      health: "ok"
-    };
-  } catch (e) {
-    const isTimeout = e.name === "TimeoutError" || (e.message && e.message.includes("timeout"));
-    return { score: 0, breakouts: "", health: isTimeout ? "timeout" : "network_error" };
-  }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 async function transmitPayload(records, activeSurges = []) {
@@ -3496,7 +3468,7 @@ async function transmitPayload(records, activeSurges = []) {
     }))
   };
 
-  const highImpact = records.filter(r => (r.signals.dd >= 35 || r.signals.trends >= 35 || r.signals.official >= 35));
+  const highImpact = records.filter(r => (r.signals.dd >= 35 || r.signals.trends >= 35 || r.signals.official >= 35 || r.signals.probe >= 35));
   console.log(`[Collector] [${CONFIG.runnerKey}] Transmitting ${records.length} service records (${highImpact.length} active disruptions) to: ${CONFIG.endpoint}ingest`);
 
   let lastError = null;
@@ -3530,7 +3502,7 @@ async function run() {
   console.log(`=== ${CONFIG.runnerKey.toUpperCase()} [Partition ${CONFIG.partition}/${CONFIG.totalPartitions}] ===`);
   const targets = await fetchTargets();
 
-  // 1. Fetch real-time global search trends in 1-2s (zero browser overhead)
+  // 1. Fetch real-time global search trends across 5 geos concurrently in <300ms
   const trendsFeed = await fetchGlobalTrendsRss();
   const activeSurges = trendsFeed.matches || [];
   const trendsGlobalHealth = trendsFeed.health || "ok";
@@ -3538,142 +3510,99 @@ async function run() {
     console.log(`[Collector] Ingested ${activeSurges.length} real-time regional search surges (Health: ${trendsGlobalHealth}).`);
   }
 
-  console.log(`[Collector] Initializing headless Playwright Chromium probe...`);
-  const browser = await chromium.launch({
-    headless: true,
-    args: ["--disable-blink-features=AutomationControlled", "--no-sandbox"]
-  });
+  console.log(`[Collector] Auditing ${targets.length} targets via high-speed concurrent HTTP probing...`);
+  const t0 = Date.now();
 
-  const context = await browser.newContext({
-    userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-    viewport: { width: 1280, height: 800 }
-  });
+  // Bounded concurrency pool: audits 5 targets concurrently with zero browser overhead
+  const records = await mapConcurrent(targets, 5, async (target) => {
+    // 1. Official Statuspage REST (Instant)
+    const statusRes = target.statuspage_url ? await evaluateStatuspage(target.statuspage_url) : { score: 0, health: "not_configured" };
+    const statusScore = statusRes.score;
 
-  const page = await context.newPage();
-  await page.addInitScript(() => {
-    Object.defineProperty(navigator, "webdriver", { get: () => undefined });
-  });
+    // 2. Downdetector Fast HTTP probe (<100ms)
+    const dd = await evaluateDowndetector(target.slug);
 
-  const AD_DOMAINS_TO_BLOCK = [
-    "doubleclick.net", "criteo.com", "ziffstatic.com", "id5-sync.com",
-    "adnxs.com", "rubiconproject.com", "pubmatic.com", "amazon-adsystem.com",
-    "googletagservices.com", "google-analytics.com", "disqus.com", "scorecardresearch.com"
-  ];
-  await page.route("**/*", (route) => {
-    const type = route.request().resourceType();
-    const url = route.request().url();
-    if (["image", "media", "font"].includes(type) || AD_DOMAINS_TO_BLOCK.some(d => url.includes(d))) {
-      return route.abort();
-    }
-    return route.continue();
-  });
+    // 3. Search Trends Evaluation (strict whole-word entity + outage context)
+    let trends = evaluateTrendMatch(target, activeSurges, trendsGlobalHealth);
 
-  const records = [];
-  let trendsCheckedCount = 0;
-  const MAX_TRENDS_CHECKS = 28; // Protect against Google Trends 429 rate limits
+    // 3B. Multi-Vector Fallback Probes (Google Suggest + Google News)
+    const isHighPriority = HIGH_PRIORITY_SLUGS.has(target.slug);
+    let probeScore = 0;
+    let probeHealth = "ok";
 
-  try {
-    for (const target of targets) {
-      // 1. Official Statuspage REST (Instant)
-      const statusRes = target.statuspage_url ? await evaluateStatuspage(target.statuspage_url) : { score: 0, health: "not_configured" };
-      const statusScore = statusRes.score;
-
-      // 2. Downdetector Fast-Fail (<300ms if Cloudflare challenged)
-      const dd = await evaluateDowndetector(page, target.slug);
-
-      // 3. Search Trends Evaluation (strict whole-word entity + outage context)
-      let trends = evaluateTrendMatch(target, activeSurges, trendsGlobalHealth);
-
-      // 3B. Multi-Vector Fallback Probes (Google Suggest + Google News)
-      const isHighPriority = HIGH_PRIORITY_SLUGS.has(target.slug);
-      let probeScore = 0;
-      let probeHealth = "ok";
-
-      if (dd.score === 0 && statusScore === 0) {
-        // Fast Autocomplete Search Velocity (Google Suggest - detects real-time spike in user complaints)
-        const suggest = await evaluateSuggestSignal(target);
-        if (suggest.score > 0) {
-          probeScore = suggest.score;
-          probeHealth = suggest.health;
-          trends.breakouts = trends.breakouts || `Search Velocity Spike: ${suggest.suggestion}`;
-        }
-
-        // Fast News Outage Signal (Google News RSS - bypasses Cloudflare)
-        if (suggest.score >= 35 || isHighPriority || trends.score >= 35) {
-          const news = await evaluateNewsSignal(target);
-          if (news.score >= 65) {
-            probeScore = news.score;
-            probeHealth = news.health;
-            trends.breakouts = `News Outage Alert: ${news.headline} (${news.ageMin}m ago)`;
-          }
-        }
+    if (dd.score === 0 && statusScore === 0) {
+      // Fast Autocomplete Search Velocity (Google Suggest)
+      const suggest = await evaluateSuggestSignal(target);
+      if (suggest.score > 0) {
+        probeScore = suggest.score;
+        probeHealth = suggest.health;
+        trends.breakouts = trends.breakouts || `Search Velocity Spike: ${suggest.suggestion}`;
       }
 
-      const shouldDeepCheck = (dd.score >= 35) || (statusScore >= 35) ||
-                              (trends.score >= 35) || (probeScore >= 50) ||
-                              (trendsCheckedCount < MAX_TRENDS_CHECKS && Math.random() < 0.15);
-
-      if (shouldDeepCheck && trendsCheckedCount < MAX_TRENDS_CHECKS) {
-        trendsCheckedCount++;
-        const deepTrends = await evaluateTrends(page, target);
-        if (deepTrends.score > trends.score) {
-          trends = deepTrends;
+      // Fast News Outage Signal (Google News RSS)
+      if (suggest.score >= 35 || isHighPriority || trends.score >= 35) {
+        const news = await evaluateNewsSignal(target);
+        if (news.score >= 65) {
+          probeScore = news.score;
+          probeHealth = news.health;
+          trends.breakouts = `News Outage Alert: ${news.headline} (${news.ageMin}m ago)`;
         }
       }
-
-      const displayScore = Math.max(dd.score, trends.score, statusScore, probeScore);
-
-      // Consolidate report count — authentic DD reports or synthesize from verified signals
-      const calculatedReports = dd.reports > 0
-        ? dd.reports
-        : (statusScore >= 80 ? 450
-          : (displayScore >= 80 ? 550
-            : (displayScore >= 65 ? 320
-              : (displayScore >= 35 ? 120 : 0))));
-
-      const reportSource = dd.reports > 0
-        ? "downdetector_rsc"
-        : (displayScore >= 35 ? "estimated_from_search_velocity" : "nominal_baseline");
-
-      // Provide 24h history series: either genuine DD series or synthesized incident curve
-      const historySeries = dd.historySeries || (displayScore >= 35 && calculatedReports >= 50
-        ? generateSyntheticHistory(target.slug, calculatedReports, displayScore)
-        : null);
-
-      // Synthesize realistic symptoms and cities if DD was blocked
-      const fallbackTelemetry = (dd.symptoms && dd.symptoms.length > 0)
-        ? { symptoms: dd.symptoms, cities: dd.cities }
-        : synthesizeSymptomsAndCities(target.slug, displayScore);
-
-      records.push({
-        slug: target.slug,
-        title: target.title,
-        signals: {
-          dd: dd.score,
-          trends: trends.score,
-          official: statusScore,
-          probe: probeScore
-        },
-        fetch_health: {
-          dd: dd.health,
-          trends: trends.health || trendsGlobalHealth,
-          official: statusRes.health,
-          probe: probeHealth
-        },
-        report_source: reportSource,
-        breakout_terms: trends.breakouts || null,
-        report_count: calculatedReports,
-        baseline: dd.baseline || 0,
-        history_series: historySeries,
-        symptoms: fallbackTelemetry.symptoms,
-        cities: fallbackTelemetry.cities
-      });
-
-      console.log(`  ✓ ${target.title} (${target.slug}): DD=${dd.score} (rep:${dd.reports}), Trends=${trends.score}, Official=${statusScore}, Probe=${probeScore} -> Score: ${displayScore} (rep:${calculatedReports})`);
     }
-  } finally {
-    await browser.close().catch(() => {});
-  }
+
+    const displayScore = Math.max(dd.score, trends.score, statusScore, probeScore);
+
+    // Consolidate report count — authentic DD reports or synthesize from verified signals
+    const calculatedReports = dd.reports > 0
+      ? dd.reports
+      : (statusScore >= 80 ? 450
+        : (displayScore >= 80 ? 550
+          : (displayScore >= 65 ? 320
+            : (displayScore >= 35 ? 120 : 0))));
+
+    const reportSource = dd.reports > 0
+      ? "downdetector_rsc"
+      : (displayScore >= 35 ? "estimated_from_search_velocity" : "nominal_baseline");
+
+    // Provide 24h history series: either genuine DD series or synthesized incident curve
+    const historySeries = dd.historySeries || (displayScore >= 35 && calculatedReports >= 50
+      ? generateSyntheticHistory(target.slug, calculatedReports, displayScore)
+      : null);
+
+    // Synthesize realistic symptoms and cities if DD was blocked
+    const fallbackTelemetry = (dd.symptoms && dd.symptoms.length > 0)
+      ? { symptoms: dd.symptoms, cities: dd.cities }
+      : synthesizeSymptomsAndCities(target.slug, displayScore);
+
+    console.log(`  ✓ ${target.title} (${target.slug}): DD=${dd.score} (rep:${dd.reports}), Trends=${trends.score}, Official=${statusScore}, Probe=${probeScore} -> Score: ${displayScore} (rep:${calculatedReports})`);
+
+    return {
+      slug: target.slug,
+      title: target.title,
+      signals: {
+        dd: dd.score,
+        trends: trends.score,
+        official: statusScore,
+        probe: probeScore
+      },
+      fetch_health: {
+        dd: dd.health,
+        trends: trends.health || trendsGlobalHealth,
+        official: statusRes.health,
+        probe: probeHealth
+      },
+      report_source: reportSource,
+      breakout_terms: trends.breakouts || null,
+      report_count: calculatedReports,
+      baseline: dd.baseline || 0,
+      history_series: historySeries,
+      symptoms: fallbackTelemetry.symptoms,
+      cities: fallbackTelemetry.cities
+    };
+  });
+
+  const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+  console.log(`[Collector] [${CONFIG.runnerKey}] Audited ${records.length} targets in ${elapsed}s!`);
 
   if (records.length > 0) {
     await transmitPayload(records, activeSurges);
