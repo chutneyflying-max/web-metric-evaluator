@@ -738,7 +738,7 @@ async function evaluateStatuspage(url) {
  * Extracts 24-hour historical curve, peak report volume, and status text from React Fiber
  */
 async function evaluateDowndetector(page, slug) {
-  const tlds = ["ca", "co.uk", "com.au", "ie", "in"];
+  const tlds = ["com", "ca", "co.uk", "com.au", "ie", "in"];
   let lastError = null;
 
   for (const tld of tlds) {
@@ -746,11 +746,22 @@ async function evaluateDowndetector(page, slug) {
     try {
       const res = await page.goto(url, { waitUntil: "commit", timeout: 10000 });
       const status = res.status();
-      if (status === 403 || status === 429) {
-        lastError = `HTTP ${status} on .${tld}`;
+      if (status === 429) {
+        lastError = `HTTP 429 rate limit on .${tld}`;
         continue;
       }
-      if (status !== 200) {
+      // Wait up to 6s for Cloudflare Turnstile challenge resolution if 403 or 200
+      if (status === 403 || status === 200) {
+        const isBypassed = await page.waitForFunction(() => {
+          const scripts = Array.from(document.querySelectorAll("script")).map(s => s.textContent || "");
+          return scripts.some(s => s.includes("CompanyType"));
+        }, { timeout: 6000 }).catch(() => null);
+
+        if (!isBypassed) {
+          lastError = `HTTP ${status} challenge unresolved on .${tld}`;
+          continue;
+        }
+      } else if (status !== 200) {
         lastError = `HTTP ${status} on .${tld}`;
         continue;
       }
@@ -761,7 +772,7 @@ async function evaluateDowndetector(page, slug) {
         return scripts.some(s => s.includes("CompanyType"));
       }, { timeout: 4000 }).catch(() => null);
 
-      const multiplier = (tld === "ca" ? 10 : (tld === "com.au" ? 12 : (tld === "ie" ? 30 : 4)));
+      const multiplier = (tld === "com" ? 1 : (tld === "ca" ? 10 : (tld === "com.au" ? 12 : (tld === "ie" ? 30 : 4))));
 
       const data = await page.evaluate((mult) => {
         const scripts = Array.from(document.querySelectorAll("script")).map(s => s.textContent || "");
@@ -863,20 +874,30 @@ async function evaluateDowndetector(page, slug) {
         latestBaseline = data.historySeries[data.historySeries.length - 1].b || 0;
       }
 
+      let peakRatio = 1.0;
+      if (data.historySeries && data.historySeries.length > 0) {
+        const baseForRatio = Math.max(1, latestBaseline || data.baseline);
+        peakRatio = recentPeak / baseForRatio;
+      }
+
       const stLower = (data.statusText || "").toLowerCase();
       let score = 0;
       if (stLower === "danger") {
         score = 85;
       } else if (stLower === "warning") {
-        score = 65;
+        score = 75; // Downdetector official warning badge
       } else if (recentPeak >= 500) {
-        score = 80; // Major disruption in last 4 hours
-      } else if (recentPeak >= 100) {
-        score = 50; // Elevated disruption in last 4 hours
-      } else if (recentPeak >= 30) {
-        score = 30;
+        score = 85;
+      } else if (recentPeak >= 150) {
+        score = 75;
+      } else if (recentPeak >= 30 && peakRatio >= 3.0) {
+        score = 70; // 3x breakout over baseline (e.g. Call of Duty 75 vs 10 baseline)
+      } else if (recentPeak >= 50) {
+        score = 50;
+      } else if (recentPeak >= 20 && peakRatio >= 2.0) {
+        score = 35;
       } else {
-        score = 0; // Operational
+        score = 0;
       }
 
       const reportedVol = recentPeak > 0 ? recentPeak : latestReport;
