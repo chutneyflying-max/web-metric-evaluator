@@ -3317,7 +3317,7 @@ async function evaluateTrends(page, target) {
   }
 }
 
-async function transmitPayload(records) {
+async function transmitPayload(records, activeSurges = []) {
   const payload = {
     pipeline_provenance: {
       runner: CONFIG.runnerKey,
@@ -3326,7 +3326,14 @@ async function transmitPayload(records) {
       total_partitions: CONFIG.totalPartitions,
       timestamp: Math.floor(Date.now() / 1000)
     },
-    services: records
+    services: records,
+    explore_trends: (activeSurges || []).map(s => ({
+      query: s.title,
+      traffic: s.traffic,
+      geo: s.geo || "US",
+      source_channel: "rss_swarm",
+      source: CONFIG.runnerKey
+    }))
   };
 
   const highImpact = records.filter(r => (r.signals.dd >= 35 || r.signals.trends >= 35 || r.signals.official >= 35));
@@ -3456,7 +3463,7 @@ async function run() {
   }
 
   if (records.length > 0) {
-    await transmitPayload(records);
+    await transmitPayload(records, activeSurges);
   }
 }
 
