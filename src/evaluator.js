@@ -3171,25 +3171,37 @@ async function evaluateDowndetector(slug) {
     }
 
     if (historySeries.length > 0) {
-      const recentSlice = historySeries.slice(-16);
+      const recentSlice = historySeries.slice(-4);
       const recentPeak = Math.max(...recentSlice.map(p => p.v));
-      const latestBaseline = historySeries[historySeries.length - 1].b || 0;
+      const latestPoint = historySeries[historySeries.length - 1];
+      const latestBaseline = latestPoint.b || 0;
       const baseForRatio = Math.max(1, latestBaseline || baseline);
       const peakRatio = recentPeak / baseForRatio;
 
       let score = 0;
       const stLower = (statusText || "").toLowerCase();
-      if (stLower === "danger") score = 85;
-      else if (stLower === "warning") score = 75;
-      else if (recentPeak >= 500) score = 85;
-      else if (recentPeak >= 150) score = 75;
-      else if (recentPeak >= 30 && peakRatio >= 3.0) score = 70;
-      else if (recentPeak >= 50) score = 50;
-      else if (recentPeak >= 20 && peakRatio >= 2.0) score = 35;
+      if (stLower === "danger") {
+        score = 85;
+      } else if (stLower === "warning") {
+        score = 70;
+      } else if (stLower === "success") {
+        // Explicit success: only spike if recent points show a massive unacknowledged breakout
+        if (recentPeak >= 300 && peakRatio >= 5.0) {
+          score = 75;
+        } else {
+          score = 0;
+        }
+      } else {
+        // Unknown statusText: strictly require high peak-to-baseline ratio
+        if (recentPeak >= 100 && peakRatio >= 4.0) score = 80;
+        else if (recentPeak >= 50 && peakRatio >= 3.0) score = 65;
+        else if (recentPeak >= 30 && peakRatio >= 2.5) score = 40;
+        else score = 0;
+      }
 
       return {
         score,
-        reports: recentPeak,
+        reports: score > 0 ? recentPeak : (latestPoint.v || 0),
         baseline: latestBaseline || baseline,
         statusText: statusText,
         historySeries: historySeries,
@@ -3306,8 +3318,8 @@ async function evaluateNewsSignal(target) {
 
     const xml = await res.text();
     const itemRegex = /<item>[\s\S]*?<title>(.*?)<\/title>[\s\S]*?<pubDate>(.*?)<\/pubDate>[\s\S]*?<\/item>/g;
-    const OUTAGE_PATTERNS = /\b(down|outage|outages|server|servers|offline|crash|crashing|not working|maintenance|disruption|issues|problem)\b/i;
-    const BENIGN_PATTERNS = /\b(weather|lottery|strike|movie|trailer|review|score|match|vs)\b/i;
+    const BENIGN_PATTERNS = /\b(weather|lottery|strike|movie|trailer|review|score|match|vs|doubles? down|shuts? down|tears? down|stepped? down|clocks? down|runs? down|counts? down|backs? down|hands? down|face down|toned? down|calmed? down|marks? down|trade down|shares? down|stocks? down|points? down|touchdown|issues? (pessimistic|forecast|guidance|rating|shares?|warning|statement|advisory|stock|bonds?|note|report|dividend|target|price))\b/i;
+    const STRICT_OUTAGE_PATTERNS = /\b(is down|are down|went down|goes down|servers? down|services? down|website down|app down|network down|outage|outages|blackout|offline|not working|downtime|unresponsive|connection issues?|server issues?|widespread issues?)\b/i;
 
     let m;
     while ((m = itemRegex.exec(xml)) !== null) {
@@ -3324,7 +3336,13 @@ async function evaluateNewsSignal(target) {
                             (cleanSlug.length >= 3 && headlineLower.includes(cleanSlug));
       if (!targetMatches) continue;
 
-      if (OUTAGE_PATTERNS.test(headline) && !BENIGN_PATTERNS.test(headline)) {
+      if (BENIGN_PATTERNS.test(headline)) continue;
+
+      const escapedTitle = cleanTitle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const brandDownRe = new RegExp(`\\b${escapedTitle}\\s+down\\b`, "i");
+      const isOutage = STRICT_OUTAGE_PATTERNS.test(headline) || brandDownRe.test(headline);
+
+      if (isOutage) {
         const isCritical = /\b(major outage|widespread|massive|servers down|server down|offline)\b/i.test(headline);
         return { score: isCritical ? 85 : 75, headline, ageMin, health: "media_confirmed" };
       }
@@ -3337,39 +3355,9 @@ async function evaluateNewsSignal(target) {
 }
 
 async function evaluateSuggestSignal(target) {
-  const cleanSlug = target.slug.replace(/-/g, " ").trim();
-  const query = `${cleanSlug} down`;
-  const url = `https://suggestqueries.google.com/complete/search?client=firefox&q=${encodeURIComponent(query)}`;
-
-  try {
-    const res = await fetch(url, {
-      headers: { "User-Agent": "Mozilla/5.0" },
-      signal: AbortSignal.timeout(2500)
-    });
-    if (res.status === 429) return { score: 0, suggestion: "", health: "rate_limited" };
-    if (!res.ok) return { score: 0, suggestion: "", health: `http_${res.status}` };
-
-    const json = await res.json();
-    const suggestions = json[1] || [];
-    
-    // Tier 1: Definite outage search queries (Calibrated to 50 for F-05)
-    const CRITICAL_SUGGEST_RE = /\b(down detector|downdetector|servers down|server down|server outage|outage today|is down today|downtime today)\b/i;
-    const critMatch = suggestions.find(s => CRITICAL_SUGGEST_RE.test(s));
-    if (critMatch) {
-      return { score: 50, suggestion: critMatch, health: "suggest_spike" };
-    }
-
-    // Tier 2: Elevated operational disruption queries (Calibrated to 35 for F-05)
-    const WARN_SUGGEST_RE = /\b(not working today|not working|downtime|server status|login error|login issues|connection error)\b/i;
-    const warnMatch = suggestions.find(s => WARN_SUGGEST_RE.test(s));
-    if (warnMatch) {
-      return { score: 35, suggestion: warnMatch, health: "suggest_elevated" };
-    }
-    return { score: 0, suggestion: "", health: "ok" };
-  } catch (e) {
-    const isTimeout = e.name === "TimeoutError" || (e.message && e.message.includes("timeout"));
-    return { score: 0, suggestion: "", health: isTimeout ? "timeout" : "network_error" };
-  }
+  // Google Autocomplete for '<brand> down' is historical evergreen search volume (e.g. 'att downdetector'),
+  // NOT a real-time event signal. Always return 0 to prevent static autocomplete false positives.
+  return { score: 0, suggestion: "", health: "ok" };
 }
 
 function synthesizeSymptomsAndCities(targetSlug, score) {
@@ -3525,22 +3513,14 @@ async function run() {
     // 3. Search Trends Evaluation (strict whole-word entity + outage context)
     let trends = evaluateTrendMatch(target, activeSurges, trendsGlobalHealth);
 
-    // 3B. Multi-Vector Fallback Probes (Google Suggest + Google News)
+    // 3B. Multi-Vector Fallback Probes (Google News RSS verified headlines)
     const isHighPriority = HIGH_PRIORITY_SLUGS.has(target.slug);
     let probeScore = 0;
     let probeHealth = "ok";
 
     if (dd.score === 0 && statusScore === 0) {
-      // Fast Autocomplete Search Velocity (Google Suggest)
-      const suggest = await evaluateSuggestSignal(target);
-      if (suggest.score > 0) {
-        probeScore = suggest.score;
-        probeHealth = suggest.health;
-        trends.breakouts = trends.breakouts || `Search Velocity Spike: ${suggest.suggestion}`;
-      }
-
-      // Fast News Outage Signal (Google News RSS)
-      if (suggest.score >= 35 || isHighPriority || trends.score >= 35) {
+      // News Outage Signal (Google News RSS with published <= 180m and explicit target match)
+      if (trends.score >= 35 || isHighPriority) {
         const news = await evaluateNewsSignal(target);
         if (news.score >= 65) {
           probeScore = news.score;
@@ -3553,16 +3533,21 @@ async function run() {
     const displayScore = Math.max(dd.score, trends.score, statusScore, probeScore);
 
     // Consolidate report count — authentic DD reports or synthesize from verified signals
-    const calculatedReports = dd.reports > 0
-      ? dd.reports
-      : (statusScore >= 80 ? 450
-        : (displayScore >= 80 ? 550
-          : (displayScore >= 65 ? 320
-            : (displayScore >= 35 ? 120 : 0))));
+    // CRITICAL: Nominal services (displayScore === 0) MUST have calculatedReports = 0 to prevent Bayesian false alarms
+    const calculatedReports = displayScore === 0
+      ? 0
+      : (dd.reports > 0
+        ? dd.reports
+        : (statusScore >= 80 ? 450
+          : (displayScore >= 80 ? 550
+            : (displayScore >= 65 ? 320
+              : (displayScore >= 35 ? 120 : 0)))));
 
-    const reportSource = dd.reports > 0
-      ? "downdetector_rsc"
-      : (displayScore >= 35 ? "estimated_from_search_velocity" : "nominal_baseline");
+    const reportSource = displayScore === 0
+      ? "nominal_baseline"
+      : (dd.reports > 0
+        ? "downdetector_rsc"
+        : (displayScore >= 35 ? "estimated_from_search_velocity" : "nominal_baseline"));
 
     // Provide 24h history series: either genuine DD series or synthesized incident curve
     const historySeries = dd.historySeries || (displayScore >= 35 && calculatedReports >= 50
