@@ -27,7 +27,7 @@ const CONFIG = {
 const OUTAGE_PATTERNS = /\b(down|is down|server down|servers down|server outage|outage|not working|crash|cannot login|offline|error|halted|trading halted|market crash|blackout|cyberattack)\b/i;
 const FINANCIAL_PATTERNS = /\b(stock|stocks|market|nasdaq|dow jones|trading|shares|crypto|selloff|recession|drop|halt)\b/i;
 const CONFLICT_PATTERNS = /\b(war|missile|airstrike|military|airspace|conflict|blackout|cyberattack|ceasefire|drone strike)\b/i;
-const BENIGN_PATTERNS = /\b(download|apk|lyrics|wallpaper|guide|installer|weather|forecast|temperature|movie|song|score|highlights)\b/i;
+const BENIGN_PATTERNS = /\b(download|apk|lyrics|wallpaper|guide|installer|weather|forecast|temperature|snow|rain|storm|hurricane|tornado|lottery|lotto|jackpot|result|results|draw|kerala|strike|strikes|tube strike|train strike|rail strike|walkout|protest|union|theft|robbery|police|arrest|suspect|crime|shooting|movie|trailer|box office|actor|actress|album|song|score|highlights|vs|match|gameplay|patch notes|update|sale|deal|price|buy)\b/i;
 
 const HIGH_PRIORITY_SLUGS = new Set([
   'battlefield', 'call-of-duty', 'fortnite', 'roblox', 'discord', 'steam',
@@ -3196,6 +3196,87 @@ async function evaluateDowndetector(page, slug) {
  * Google Trends 1h Surge Evaluator
  * Directly checks search velocity anomalies without Cloudflare blocking
  */
+/**
+ * Strict Outage Trend Validator
+ * Prevents false positives by requiring full entity matching (whole words)
+ * and distinguishing outage intent from news/entertainment/weather/sports.
+ */
+function evaluateTrendMatch(target, activeSurges) {
+  if (!activeSurges || activeSurges.length === 0) {
+    return { score: 0, breakouts: "" };
+  }
+
+  const slugClean = target.slug.replace(/-/g, " ").trim().toLowerCase();
+  const rawTitle = (target.title || "").toLowerCase().replace(/\s*\(.*?\)/g, "").trim();
+  
+  const candidatePhrases = new Set();
+  if (slugClean.length >= 3) candidatePhrases.add(slugClean);
+  if (rawTitle.length >= 3) candidatePhrases.add(rawTitle);
+  
+  for (const kw of (target.keywords || [])) {
+    const k = kw.toLowerCase().trim();
+    if (k.length >= 4) {
+      candidatePhrases.add(k);
+    }
+  }
+
+  const STOP_WORDS = new Set([
+    "the", "and", "for", "with", "app", "net", "portal", "games", "online", 
+    "service", "services", "cloud", "system", "systems", "network", "networks", 
+    "platform", "strike", "dead", "lottery", "weather", "theft", "down", "outage",
+    "login", "error", "server", "servers", "video", "arts", "ea", "sun", "bell", "war"
+  ]);
+  for (const stop of STOP_WORDS) {
+    candidatePhrases.delete(stop);
+  }
+
+  const OUTAGE_KEYWORDS_RE = /\b(down|is down|outage|outages|not working|server down|servers down|server outage|offline|cannot login|cant login|login error|error code|crashing|blackout|disruption|maintenance|maintenance break|slow|timeouts)\b/i;
+  const GLOBAL_REJECT_RE = /\b(weather|forecast|rain|temperature|snow|storm|tornado|hurricane|lottery|lotto|jackpot|result|results|draw|winning numbers|kerala|strike|strikes|tube strike|train strike|rail strike|walkout|protest|union|election|vote|poll|senate|minister|president|parliament|theft|robbery|police|arrest|suspect|murder|shooting|movie|trailer|box office|actor|actress|album|song|lyrics|highlights|score|vs|match|gameplay|patch notes|update|sale|deal|price|buy|download|apk|wallpaper)\b/i;
+
+  let bestMatch = null;
+  let bestScore = 0;
+
+  for (const s of activeSurges) {
+    const rssTitle = s.title.toLowerCase().trim();
+    if (BENIGN_PATTERNS.test(rssTitle) || GLOBAL_REJECT_RE.test(rssTitle)) continue;
+
+    let matchedPhrase = null;
+    for (const phrase of candidatePhrases) {
+      const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
+      const regex = new RegExp(`\b${escaped}\b`, "i");
+      if (regex.test(rssTitle)) {
+        matchedPhrase = phrase;
+        break;
+      }
+    }
+
+    if (!matchedPhrase) continue;
+
+    const hasOutageIntent = OUTAGE_KEYWORDS_RE.test(rssTitle);
+
+    if (hasOutageIntent) {
+      const score = 85;
+      if (score > bestScore) {
+        bestScore = score;
+        bestMatch = s;
+      }
+    } else {
+      if (matchedPhrase.length >= 4 && !STOP_WORDS.has(matchedPhrase)) {
+        const score = 35;
+        if (score > bestScore) {
+          bestScore = score;
+          bestMatch = s;
+        }
+      }
+    }
+  }
+
+  return {
+    score: bestScore,
+    breakouts: bestMatch ? `Search Surge: ${bestMatch.title} (${bestMatch.traffic} queries)` : ""
+  };
+}
+
 async function evaluateTrends(page, target) {
   const query = (target.keywords && target.keywords.length > 0) ? target.keywords[0] : `${target.slug} down`;
   const url = `https://trends.google.com/trends/explore?date=${encodeURIComponent(CONFIG.timeWindow)}&q=${encodeURIComponent(query)}`;
@@ -3324,46 +3405,8 @@ async function run() {
       // 2. Downdetector Fast-Fail (<300ms if Cloudflare challenged)
       const dd = await evaluateDowndetector(page, target.slug);
 
-      // 3. Search Trends Evaluation
-      let trends = { score: 0, breakouts: "" };
-
-      // 3A. Check against real-time global RSS surges (precision-scored by match quality)
-      const slugClean = target.slug.replace(/-/g, " ").toLowerCase();
-      const targetKeywords = (target.keywords || []).map(k => k.toLowerCase());
-      const keywordTokens = [
-        ...slugClean.split(/\s+/),
-        ...targetKeywords.flatMap(k => k.split(/\s+/))
-      ].filter(t => t.length >= 3);
-      const uniqueTokens = [...new Set(keywordTokens)];
-
-      const OUTAGE_CONTEXT_RE = /\b(down|outage|not working|server|offline|crash|error|issue|problem|disruption|fail|blackout)\b/i;
-
-      let bestRssMatch = null;
-      let bestRssScore = 0;
-      for (const s of activeSurges) {
-        const rssTitle = s.title.toLowerCase();
-        if (BENIGN_PATTERNS.test(s.title)) continue;
-        const trafficNum = parseInt((s.traffic || "0").replace(/[^0-9]/g, "")) || 0;
-        if (trafficNum < 100 && s.traffic !== "Breakout") continue;
-
-        let matchScore = 0;
-        if (rssTitle.includes(slugClean) && slugClean.length >= 4) {
-          matchScore = OUTAGE_CONTEXT_RE.test(s.title) ? 85 : 50;
-        } else if (targetKeywords.some(k => k.length >= 5 && rssTitle.includes(k))) {
-          matchScore = OUTAGE_CONTEXT_RE.test(s.title) ? 65 : 35;
-        } else if (uniqueTokens.some(t => t.length >= 6 && rssTitle.includes(t))) {
-          matchScore = 35;
-        }
-
-        if (matchScore > bestRssScore) {
-          bestRssScore = matchScore;
-          bestRssMatch = s;
-        }
-      }
-      if (bestRssMatch && bestRssScore > 0) {
-        trends.score = Math.max(trends.score, bestRssScore);
-        trends.breakouts = `Search Surge: ${bestRssMatch.title} (${bestRssMatch.traffic} queries)`;
-      }
+      // 3. Search Trends Evaluation (strict whole-word entity + outage context)
+      let trends = evaluateTrendMatch(target, activeSurges);
 
       // 3B. Deep Search Exploration (High-Priority Platforms or Elevated Signals)
       const shouldDeepCheck = (dd.score >= 35) || (statusScore >= 35) ||
