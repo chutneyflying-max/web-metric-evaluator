@@ -3327,25 +3327,42 @@ async function run() {
       // 3. Search Trends Evaluation
       let trends = { score: 0, breakouts: "" };
 
-      // 3A. Check against real-time global RSS surges
+      // 3A. Check against real-time global RSS surges (precision-scored by match quality)
       const slugClean = target.slug.replace(/-/g, " ").toLowerCase();
       const targetKeywords = (target.keywords || []).map(k => k.toLowerCase());
-      // Build token set: individual words from slug + all keyword phrases
       const keywordTokens = [
         ...slugClean.split(/\s+/),
         ...targetKeywords.flatMap(k => k.split(/\s+/))
       ].filter(t => t.length >= 3);
       const uniqueTokens = [...new Set(keywordTokens)];
 
-      const matchingRss = activeSurges.find(s => {
+      const OUTAGE_CONTEXT_RE = /\b(down|outage|not working|server|offline|crash|error|issue|problem|disruption|fail|blackout)\b/i;
+
+      let bestRssMatch = null;
+      let bestRssScore = 0;
+      for (const s of activeSurges) {
         const rssTitle = s.title.toLowerCase();
-        return rssTitle.includes(slugClean) ||
-               targetKeywords.some(k => rssTitle.includes(k)) ||
-               uniqueTokens.some(t => rssTitle.includes(t));
-      });
-      if (matchingRss) {
-        trends.score = Math.max(trends.score, 85);
-        trends.breakouts = `Search Surge: ${matchingRss.title} (${matchingRss.traffic} queries)`;
+        if (BENIGN_PATTERNS.test(s.title)) continue;
+        const trafficNum = parseInt((s.traffic || "0").replace(/[^0-9]/g, "")) || 0;
+        if (trafficNum < 100 && s.traffic !== "Breakout") continue;
+
+        let matchScore = 0;
+        if (rssTitle.includes(slugClean) && slugClean.length >= 4) {
+          matchScore = OUTAGE_CONTEXT_RE.test(s.title) ? 85 : 50;
+        } else if (targetKeywords.some(k => k.length >= 5 && rssTitle.includes(k))) {
+          matchScore = OUTAGE_CONTEXT_RE.test(s.title) ? 65 : 35;
+        } else if (uniqueTokens.some(t => t.length >= 6 && rssTitle.includes(t))) {
+          matchScore = 35;
+        }
+
+        if (matchScore > bestRssScore) {
+          bestRssScore = matchScore;
+          bestRssMatch = s;
+        }
+      }
+      if (bestRssMatch && bestRssScore > 0) {
+        trends.score = Math.max(trends.score, bestRssScore);
+        trends.breakouts = `Search Surge: ${bestRssMatch.title} (${bestRssMatch.traffic} queries)`;
       }
 
       // 3B. Deep Search Exploration (High-Priority Platforms or Elevated Signals)
@@ -3361,10 +3378,11 @@ async function run() {
         }
       }
 
-      // Consolidate report count
+      // Consolidate report count — only synthesize from verified statuspage signals
+      // Trends = search interest, NOT confirmed user reports
       const calculatedReports = dd.reports > 0
         ? dd.reports
-        : (trends.score >= 65 ? 450 : (trends.score >= 35 ? 120 : (statusScore >= 35 ? 200 : 0)));
+        : (statusScore >= 80 ? 400 : (statusScore >= 35 ? 150 : 0));
 
       records.push({
         slug: target.slug,
