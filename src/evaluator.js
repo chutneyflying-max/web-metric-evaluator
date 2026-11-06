@@ -3013,9 +3013,14 @@ async function fetchTargets() {
   if (!CONFIG.endpoint || !CONFIG.secret) {
     return FALLBACK_SEED_TARGETS;
   }
-  const url = `${CONFIG.endpoint}targets?secret=${encodeURIComponent(CONFIG.secret)}&partition=${CONFIG.partition}&total_partitions=${CONFIG.totalPartitions}`;
+  const url = `${CONFIG.endpoint}targets?partition=${CONFIG.partition}&total_partitions=${CONFIG.totalPartitions}`;
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
+    const res = await fetch(url, {
+      headers: {
+        "X-DownRadar-Secret": CONFIG.secret
+      },
+      signal: AbortSignal.timeout(15000)
+    });
     if (res.ok) {
       const data = await res.json();
       if (Array.isArray(data.targets) && data.targets.length > 0) {
