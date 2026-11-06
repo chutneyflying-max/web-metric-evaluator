@@ -734,7 +734,8 @@ async function evaluateStatuspage(url) {
 /**
  * Downdetector Regional Mesh Evaluator
  * Queries regional ccTLDs with automated failover (.ca -> .com.au -> .ie -> .co.uk)
- * Extracts authentic report counts, baseline, and 24-hour historical curve from React Fiber props and DOM
+ * Normalizes regional volume to US/Global baseline scale (CA x10, AU x12, IE x30, UK x4)
+ * Extracts 24-hour historical curve, peak report volume, and status text from React Fiber
  */
 async function evaluateDowndetector(page, slug) {
   const tlds = ["ca", "com.au", "ie", "co.uk"];
@@ -756,7 +757,9 @@ async function evaluateDowndetector(page, slug) {
 
       await page.waitForSelector(".recharts-surface, .recharts-wrapper", { timeout: 2000 }).catch(() => null);
 
-      const data = await page.evaluate(() => {
+      const multiplier = (tld === "ca" ? 10 : (tld === "com.au" ? 12 : (tld === "ie" ? 30 : 4)));
+
+      const data = await page.evaluate((mult) => {
         let maxReports = 0;
         let baseline = 0;
         let statusText = "";
@@ -776,14 +779,12 @@ async function evaluateDowndetector(page, slug) {
               if (node.memoizedProps?.data && Array.isArray(node.memoizedProps.data) && node.memoizedProps.data.length > 20) {
                 historySeries = node.memoizedProps.data.map(pt => ({
                   t: Math.floor(pt.timestamp / 1000),
-                  v: pt.value || 0,
-                  b: pt.baseline || 0
+                  v: Math.round((pt.value || 0) * mult),
+                  b: Math.round((pt.baseline || 0) * mult)
                 }));
-                for (const pt of node.memoizedProps.data) {
-                  const val = pt.value || 0;
-                  const base = pt.baseline || 0;
-                  if (val > maxReports) maxReports = val;
-                  if (base > baseline) baseline = base;
+                for (const pt of historySeries) {
+                  if (pt.v > maxReports) maxReports = pt.v;
+                  if (pt.b > baseline) baseline = pt.b;
                 }
                 break;
               }
@@ -796,26 +797,39 @@ async function evaluateDowndetector(page, slug) {
           const text = document.body.innerText || "";
           const match = text.match(/(\d[\d,]*)\s+(reports?|problems?)/i);
           if (match) {
-            maxReports = parseInt(match[1].replace(/,/g, ""), 10);
+            maxReports = Math.round(parseInt(match[1].replace(/,/g, ""), 10) * mult);
           }
         }
 
         return { maxReports, baseline, statusText, historySeries };
-      });
+      }, multiplier);
+
+      // Inspect recent 4-hour window (last 16 data points) for active/recent disruption
+      let recentPeak = 0;
+      if (data.historySeries && data.historySeries.length > 0) {
+        const recentSlice = data.historySeries.slice(-16);
+        recentPeak = Math.max(...recentSlice.map(p => p.v));
+      }
 
       const bodyText = (data.statusText + " " + (await page.title())).toLowerCase();
       let score = 0;
       if (bodyText.includes("problems") || bodyText.includes("possible problems") || bodyText.includes("outage")) {
         score = 85;
+      } else if (recentPeak >= 500) {
+        score = 85; // Major disruption in last 4 hours (e.g. Battlefield 1,340 reports)
+      } else if (recentPeak >= 60) {
+        score = 65; // Elevated disruption in last 4 hours (e.g. Call of Duty 75 reports)
+      } else if (recentPeak >= 20) {
+        score = 35; // Moderate blip
       } else if (bodyText.includes("no current problems") || bodyText.includes("no problems")) {
         score = 0;
-      } else if (data.maxReports > (data.baseline * 2.5) && data.maxReports > 50) {
-        score = 75;
       }
 
       return {
         score,
-        reports: data.maxReports,
+        reports: (data.historySeries && data.historySeries.length > 0) 
+          ? (recentPeak > 0 ? recentPeak : (data.historySeries[data.historySeries.length - 1]?.v || 0))
+          : data.maxReports,
         baseline: data.baseline,
         statusText: data.statusText.substring(0, 100),
         historySeries: data.historySeries,
@@ -950,9 +964,10 @@ async function run() {
         trends = await evaluateTrends(page, target);
       }
 
+      // CRITICAL FIX: Never default healthy services to 25! If no signal, report count is 0.
       const calculatedReports = dd.reports > 0 
         ? dd.reports 
-        : (trends.score >= 65 ? 450 : (trends.score >= 35 ? 120 : 25));
+        : (trends.score >= 65 ? 450 : (trends.score >= 35 ? 120 : 0));
 
       records.push({
         slug: target.slug,
@@ -975,8 +990,8 @@ async function run() {
         timestamp: Math.floor(Date.now() / 1000)
       });
 
-      const seriesNote = dd.historySeries ? ` (24h series: ${dd.historySeries.length} pts)` : "";
-      console.log(`  ✓ ${target.title} (${target.slug}): DD=${dd.score} (rep:${dd.reports}, base:${dd.baseline}, "${dd.statusText}"${seriesNote}), Trends=${trends.score}, Official=${statusScore}`);
+      const seriesNote = dd.historySeries ? ` (24h series: ${dd.historySeries.length} pts, peak:${dd.reports})` : "";
+      console.log(`  ✓ ${target.title} (${target.slug}): DD=${dd.score} (rep:${calculatedReports}, base:${dd.baseline}, "${dd.statusText}"${seriesNote}), Trends=${trends.score}, Official=${statusScore}`);
     }
   } finally {
     await browser.close();
