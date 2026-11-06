@@ -3066,18 +3066,23 @@ async function fetchGlobalTrendsRss() {
 }
 
 async function evaluateStatuspage(url) {
-  if (!url) return 0;
+  if (!url) return { score: 0, health: "not_configured" };
   try {
     const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
     if (res.ok) {
       const json = await res.json();
       const indicator = json.status?.indicator || "none";
-      if (indicator === "critical") return 100;
-      if (indicator === "major") return 80;
-      if (indicator === "minor") return 35;
+      let score = 0;
+      if (indicator === "critical") score = 100;
+      else if (indicator === "major") score = 80;
+      else if (indicator === "minor") score = 35;
+      return { score, health: "ok", indicator };
     }
-  } catch (_) {}
-  return 0;
+    return { score: 0, health: `http_${res.status}` };
+  } catch (e) {
+    const isTimeout = e.name === "TimeoutError" || (e.message && e.message.includes("timeout"));
+    return { score: 0, health: isTimeout ? "timeout" : "network_error" };
+  }
 }
 
 /**
@@ -3494,7 +3499,8 @@ async function run() {
   try {
     for (const target of targets) {
       // 1. Official Statuspage REST (Instant)
-      const statusScore = target.statuspage_url ? await evaluateStatuspage(target.statuspage_url) : 0;
+      const statusRes = target.statuspage_url ? await evaluateStatuspage(target.statuspage_url) : { score: 0, health: "not_configured" };
+      const statusScore = statusRes.score;
 
       // 2. Downdetector Fast-Fail (<300ms if Cloudflare challenged)
       const dd = await evaluateDowndetector(page, target.slug);
@@ -3557,12 +3563,14 @@ async function run() {
         signals: {
           dd: dd.score,
           trends: trends.score,
-          official: statusScore
+          official: statusScore,
+          probe: 0
         },
         fetch_health: {
           dd: dd.health,
           trends: "ok",
-          official: "ok"
+          official: statusRes.health,
+          probe: "ok"
         },
         breakout_terms: trends.breakouts || null,
         report_count: calculatedReports,
