@@ -10,8 +10,12 @@ const endpoint = (rawEndpoint.includes("trycloudflare.com") || !rawEndpoint.star
   : rawEndpoint.replace(/\/?$/, "/");
 
 const secret = (process.env.DOWNRADAR_INGEST_SECRET && process.env.DOWNRADAR_INGEST_SECRET.trim())
-  ? process.env.DOWNRADAR_INGEST_SECRET.trim()
-  : "dradar_sec_9971_matrix_key";
+  || (process.env.INGEST_SECRET && process.env.INGEST_SECRET.trim());
+
+if (!secret) {
+  console.error("[Fatal] DOWNRADAR_INGEST_SECRET environment variable is missing or empty. Exiting.");
+  process.exit(1);
+}
 
 const CONFIG = {
   endpoint,
@@ -3021,9 +3025,16 @@ async function fetchTargets() {
     });
     if (res.ok) {
       const data = await res.json();
-      if (Array.isArray(data.targets) && data.targets.length > 0) {
-        console.log(`[Collector] [${CONFIG.runnerKey}] Retrieved ${data.targets.length} targets for shard ${CONFIG.partition}.`);
-        return data.targets;
+      if (Array.isArray(data.targets)) {
+        if (data.targets.length > 0) {
+          console.log(`[Collector] [${CONFIG.runnerKey}] Retrieved ${data.targets.length} targets for shard ${CONFIG.partition}.`);
+          return data.targets;
+        } else {
+          // Authoritative empty partition (P1-1): When /targets explicitly returns empty targets [],
+          // respect it authoritatively instead of falling back to seed targets.
+          console.log(`[Collector] [${CONFIG.runnerKey}] Partition ${CONFIG.partition} returned 0 targets authoritatively.`);
+          return [];
+        }
       }
     }
   } catch (e) {
@@ -3496,6 +3507,14 @@ async function run() {
   const trendsGlobalHealth = trendsFeed.health || "ok";
   if (activeSurges.length > 0) {
     console.log(`[Collector] Ingested ${activeSurges.length} real-time regional search surges (Health: ${trendsGlobalHealth}).`);
+  }
+
+  if (targets.length === 0) {
+    console.log(`[Collector] [${CONFIG.runnerKey}] 0 targets assigned to partition ${CONFIG.partition}. Completed.`);
+    if (activeSurges.length > 0) {
+      await transmitPayload([], activeSurges);
+    }
+    return;
   }
 
   console.log(`[Collector] Auditing ${targets.length} targets via high-speed concurrent HTTP probing...`);
