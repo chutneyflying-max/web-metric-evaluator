@@ -3265,7 +3265,7 @@ function evaluateTrendMatch(target, activeSurges, trendsHealth = "ok") {
     let matchedPhrase = null;
     for (const phrase of candidatePhrases) {
       const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
-      const regex = new RegExp(`\b${escaped}\b`, "i");
+      const regex = new RegExp(`\\b${escaped}\\b`, "i");
       if (regex.test(rssTitle)) {
         matchedPhrase = phrase;
         break;
