@@ -738,13 +738,13 @@ async function evaluateStatuspage(url) {
  * Extracts 24-hour historical curve, peak report volume, and status text from React Fiber
  */
 async function evaluateDowndetector(page, slug) {
-  const tlds = ["ca", "com.au", "ie", "co.uk"];
+  const tlds = ["ca", "co.uk", "com.au", "ie", "in"];
   let lastError = null;
 
   for (const tld of tlds) {
     const url = `https://downdetector.${tld}/status/${slug}/`;
     try {
-      const res = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 8000 });
+      const res = await page.goto(url, { waitUntil: "commit", timeout: 10000 });
       const status = res.status();
       if (status === 403 || status === 429) {
         lastError = `HTTP ${status} on .${tld}`;
@@ -755,20 +755,71 @@ async function evaluateDowndetector(page, slug) {
         continue;
       }
 
-      await page.waitForSelector(".recharts-surface, .recharts-wrapper", { timeout: 2000 }).catch(() => null);
+      // Wait briefly for Next.js RSC script chunk
+      await page.waitForFunction(() => {
+        const scripts = Array.from(document.querySelectorAll("script")).map(s => s.textContent || "");
+        return scripts.some(s => s.includes("CompanyType"));
+      }, { timeout: 4000 }).catch(() => null);
 
       const multiplier = (tld === "ca" ? 10 : (tld === "com.au" ? 12 : (tld === "ie" ? 30 : 4)));
 
       const data = await page.evaluate((mult) => {
+        const scripts = Array.from(document.querySelectorAll("script")).map(s => s.textContent || "");
+        const rscScript = scripts.find(s => s.includes("CompanyType"));
+
+        if (rscScript) {
+          // 1. Next.js RSC Streaming Parse (Fast, 100% reliable)
+          const statusMatch = rscScript.match(/\\\"status\\\":\\\"([a-z]+)\\\"/);
+          const status = statusMatch ? statusMatch[1] : "unknown";
+
+          const dpRegex = /\{\\\"__typename\\\":\\\"ChartDataPointType\\\",\\\"timestampUtc\\\":\\\"([^\\"]+)\\\",\\\"reportsValue\\\":(\d+),\\\"baselineValue\\\":(\d+)\}/g;
+          const historySeries = [];
+          let m;
+          let maxReports = 0;
+          let baseline = 0;
+          while ((m = dpRegex.exec(rscScript)) !== null) {
+            const v = Math.round(parseInt(m[2], 10) * mult);
+            const b = Math.round(parseInt(m[3], 10) * mult);
+            historySeries.push({
+              t: Math.floor(new Date(m[1]).getTime() / 1000),
+              v,
+              b
+            });
+            if (v > maxReports) maxReports = v;
+            if (b > baseline) baseline = b;
+          }
+
+          // Symptoms
+          const indRegex = /\{\\\"__typename\\\":\\\"LastIndicatorType\\\",\\\"localizedName\\\":\\\"([^\\"]+)\\\",\\\"count\\\":(\d+),\\\"percentage\\\":([\d.]+),\\\"id\\\":(\d+)\}/g;
+          const symptoms = [];
+          while ((m = indRegex.exec(rscScript)) !== null) {
+            symptoms.push({
+              id: parseInt(m[4], 10),
+              name: m[1],
+              count: parseInt(m[2], 10),
+              percentage: parseFloat(m[3])
+            });
+          }
+
+          // Cities
+          const cityRegex = /\{\\\"__typename\\\":\\\"CityType\\\",\\\"id\\\":\\\"(\d+)\\\",\\\"slug\\\":\\\"([^\\"]+)\\\",\\\"name\\\":\\\"([^\\"]+)\\\"\}/g;
+          const cities = [];
+          while ((m = cityRegex.exec(rscScript)) !== null) {
+            cities.push({
+              id: m[1],
+              slug: m[2],
+              name: m[3]
+            });
+          }
+
+          return { maxReports, baseline, statusText: status, historySeries, symptoms, cities };
+        }
+
+        // 2. Secondary Fallback: React Fiber Walk
         let maxReports = 0;
         let baseline = 0;
         let statusText = "";
         let historySeries = null;
-
-        const statusEl = document.querySelector(".entry-title, .status-indicator, [data-testid='status-indicator'], h2, h3");
-        if (statusEl) {
-          statusText = statusEl.textContent.trim();
-        }
 
         const el = document.querySelector(".recharts-wrapper, .recharts-responsive-container");
         if (el) {
@@ -793,46 +844,51 @@ async function evaluateDowndetector(page, slug) {
           }
         }
 
-        if (maxReports === 0) {
-          const text = document.body.innerText || "";
-          const match = text.match(/(\d[\d,]*)\s+(reports?|problems?)/i);
-          if (match) {
-            maxReports = Math.round(parseInt(match[1].replace(/,/g, ""), 10) * mult);
-          }
-        }
-
-        return { maxReports, baseline, statusText, historySeries };
+        return { maxReports, baseline, statusText, historySeries, symptoms: [], cities: [] };
       }, multiplier);
+
+      if (!data) {
+        lastError = `No telemetry chunk on .${tld}`;
+        continue;
+      }
 
       // Inspect recent 4-hour window (last 16 data points) for active/recent disruption
       let recentPeak = 0;
+      let latestReport = 0;
+      let latestBaseline = 0;
       if (data.historySeries && data.historySeries.length > 0) {
         const recentSlice = data.historySeries.slice(-16);
         recentPeak = Math.max(...recentSlice.map(p => p.v));
+        latestReport = data.historySeries[data.historySeries.length - 1].v || 0;
+        latestBaseline = data.historySeries[data.historySeries.length - 1].b || 0;
       }
 
-      const bodyText = (data.statusText + " " + (await page.title())).toLowerCase();
+      const stLower = (data.statusText || "").toLowerCase();
       let score = 0;
-      if (bodyText.includes("problems") || bodyText.includes("possible problems") || bodyText.includes("outage")) {
+      if (stLower === "danger") {
         score = 85;
+      } else if (stLower === "warning") {
+        score = 65;
       } else if (recentPeak >= 500) {
-        score = 85; // Major disruption in last 4 hours (e.g. Battlefield 1,340 reports)
-      } else if (recentPeak >= 60) {
-        score = 65; // Elevated disruption in last 4 hours (e.g. Call of Duty 75 reports)
-      } else if (recentPeak >= 20) {
-        score = 35; // Moderate blip
-      } else if (bodyText.includes("no current problems") || bodyText.includes("no problems")) {
-        score = 0;
+        score = 80; // Major disruption in last 4 hours
+      } else if (recentPeak >= 100) {
+        score = 50; // Elevated disruption in last 4 hours
+      } else if (recentPeak >= 30) {
+        score = 30;
+      } else {
+        score = 0; // Operational
       }
+
+      const reportedVol = recentPeak > 0 ? recentPeak : latestReport;
 
       return {
         score,
-        reports: (data.historySeries && data.historySeries.length > 0) 
-          ? (recentPeak > 0 ? recentPeak : (data.historySeries[data.historySeries.length - 1]?.v || 0))
-          : data.maxReports,
-        baseline: data.baseline,
-        statusText: data.statusText.substring(0, 100),
+        reports: reportedVol,
+        baseline: latestBaseline || data.baseline,
+        statusText: data.statusText || "ok",
         historySeries: data.historySeries,
+        symptoms: data.symptoms || [],
+        cities: data.cities || [],
         health: "ok",
         tld
       };
@@ -847,6 +903,8 @@ async function evaluateDowndetector(page, slug) {
     baseline: 0,
     statusText: "",
     historySeries: null,
+    symptoms: [],
+    cities: [],
     health: `failed: ${lastError || "mesh unreachable"}`,
     tld: null
   };
@@ -943,13 +1001,27 @@ async function run() {
   });
 
   const context = await browser.newContext({
-    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+    userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
     viewport: { width: 1280, height: 800 }
   });
 
   const page = await context.newPage();
   await page.addInitScript(() => {
     Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+  });
+
+  const AD_DOMAINS_TO_BLOCK = [
+    "doubleclick.net", "criteo.com", "ziffstatic.com", "id5-sync.com",
+    "adnxs.com", "rubiconproject.com", "pubmatic.com", "amazon-adsystem.com",
+    "googletagservices.com", "google-analytics.com", "disqus.com", "scorecardresearch.com"
+  ];
+  await page.route("**/*", (route) => {
+    const type = route.request().resourceType();
+    const url = route.request().url();
+    if (["image", "media", "font"].includes(type) || AD_DOMAINS_TO_BLOCK.some(d => url.includes(d))) {
+      return route.abort();
+    }
+    return route.continue();
   });
 
   const records = [];
@@ -986,11 +1058,13 @@ async function run() {
         report_count: calculatedReports,
         baseline: dd.baseline || 0,
         history_series: dd.historySeries || null,
+        symptoms: dd.symptoms || null,
+        cities: dd.cities || null,
         ratio: (dd.baseline > 0 && dd.reports > 0) ? +(dd.reports / dd.baseline).toFixed(2) : null,
         timestamp: Math.floor(Date.now() / 1000)
       });
 
-      const seriesNote = dd.historySeries ? ` (24h series: ${dd.historySeries.length} pts, peak:${dd.reports})` : "";
+      const seriesNote = dd.historySeries ? ` (24h series: ${dd.historySeries.length} pts, peak:${dd.reports}, tld:.${dd.tld})` : ` [${dd.health}]`;
       console.log(`  ✓ ${target.title} (${target.slug}): DD=${dd.score} (rep:${calculatedReports}, base:${dd.baseline}, "${dd.statusText}"${seriesNote}), Trends=${trends.score}, Official=${statusScore}`);
     }
   } finally {
