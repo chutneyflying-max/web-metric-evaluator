@@ -3030,7 +3030,7 @@ async function fetchTargets() {
 }
 
 async function fetchGlobalTrendsRss() {
-  const geos = ['US', 'GB', 'CA'];
+  const geos = ['US', 'GB', 'CA', 'AU', 'IN'];
   const matches = [];
   for (const geo of geos) {
     try {
@@ -3328,11 +3328,21 @@ async function run() {
       let trends = { score: 0, breakouts: "" };
 
       // 3A. Check against real-time global RSS surges
+      const slugClean = target.slug.replace(/-/g, " ").toLowerCase();
       const targetKeywords = (target.keywords || []).map(k => k.toLowerCase());
-      const slugClean = target.slug.replace(/-/g, " ");
-      const matchingRss = activeSurges.find(s =>
-        s.title.includes(slugClean) || targetKeywords.some(k => s.title.includes(k) || k.includes(s.title))
-      );
+      // Build token set: individual words from slug + all keyword phrases
+      const keywordTokens = [
+        ...slugClean.split(/\s+/),
+        ...targetKeywords.flatMap(k => k.split(/\s+/))
+      ].filter(t => t.length >= 3);
+      const uniqueTokens = [...new Set(keywordTokens)];
+
+      const matchingRss = activeSurges.find(s => {
+        const rssTitle = s.title.toLowerCase();
+        return rssTitle.includes(slugClean) ||
+               targetKeywords.some(k => rssTitle.includes(k)) ||
+               uniqueTokens.some(t => rssTitle.includes(t));
+      });
       if (matchingRss) {
         trends.score = Math.max(trends.score, 85);
         trends.breakouts = `Search Surge: ${matchingRss.title} (${matchingRss.traffic} queries)`;
