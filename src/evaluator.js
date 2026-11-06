@@ -3480,7 +3480,7 @@ async function transmitPayload(records, activeSurges = []) {
           "X-DownRadar-Secret": CONFIG.secret
         },
         body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(25000)
+        signal: AbortSignal.timeout(45000)
       });
       const respText = await res.text();
       console.log(`[Collector] [${CONFIG.runnerKey}] Ingestion response HTTP ${res.status}: ${respText.substring(0, 200)}`);
