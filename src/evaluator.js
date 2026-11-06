@@ -734,7 +734,7 @@ async function evaluateStatuspage(url) {
 /**
  * Downdetector Regional Mesh Evaluator
  * Queries regional ccTLDs with automated failover (.ca -> .com.au -> .ie -> .co.uk)
- * Extracts authentic report counts, baseline, and status text from React Recharts props and DOM
+ * Extracts authentic report counts, baseline, and 24-hour historical curve from React Fiber props and DOM
  */
 async function evaluateDowndetector(page, slug) {
   const tlds = ["ca", "com.au", "ie", "co.uk"];
@@ -754,36 +754,40 @@ async function evaluateDowndetector(page, slug) {
         continue;
       }
 
-      await page.waitForSelector(".recharts-surface", { timeout: 2000 }).catch(() => null);
+      await page.waitForSelector(".recharts-surface, .recharts-wrapper", { timeout: 2000 }).catch(() => null);
 
       const data = await page.evaluate(() => {
         let maxReports = 0;
         let baseline = 0;
         let statusText = "";
+        let historySeries = null;
 
         const statusEl = document.querySelector(".entry-title, .status-indicator, [data-testid='status-indicator'], h2, h3");
         if (statusEl) {
           statusText = statusEl.textContent.trim();
         }
 
-        const chartContainer = document.querySelector(".recharts-responsive-container, .recharts-surface");
-        if (chartContainer) {
-          const fiberKey = Object.keys(chartContainer).find(k => k.startsWith("__reactFiber$") || k.startsWith("__reactInternalInstance$"));
-          const propsKey = Object.keys(chartContainer).find(k => k.startsWith("__reactProps$"));
-
-          let chartData = null;
-          if (propsKey && chartContainer[propsKey]?.children?.props?.data) {
-            chartData = chartContainer[propsKey].children.props.data;
-          } else if (fiberKey && chartContainer[fiberKey]?.memoizedProps?.children?.props?.data) {
-            chartData = chartContainer[fiberKey].memoizedProps.children.props.data;
-          }
-
-          if (Array.isArray(chartData) && chartData.length > 0) {
-            for (const pt of chartData) {
-              const val = pt.value || pt.reports || pt.y || 0;
-              const base = pt.baseline || pt.expected || 0;
-              if (val > maxReports) maxReports = val;
-              if (base > baseline) baseline = base;
+        const el = document.querySelector(".recharts-wrapper, .recharts-responsive-container");
+        if (el) {
+          const fiberKey = Object.keys(el).find(k => k.startsWith("__reactFiber$"));
+          if (fiberKey) {
+            let node = el[fiberKey];
+            while (node) {
+              if (node.memoizedProps?.data && Array.isArray(node.memoizedProps.data) && node.memoizedProps.data.length > 20) {
+                historySeries = node.memoizedProps.data.map(pt => ({
+                  t: Math.floor(pt.timestamp / 1000),
+                  v: pt.value || 0,
+                  b: pt.baseline || 0
+                }));
+                for (const pt of node.memoizedProps.data) {
+                  const val = pt.value || 0;
+                  const base = pt.baseline || 0;
+                  if (val > maxReports) maxReports = val;
+                  if (base > baseline) baseline = base;
+                }
+                break;
+              }
+              node = node.return;
             }
           }
         }
@@ -796,7 +800,7 @@ async function evaluateDowndetector(page, slug) {
           }
         }
 
-        return { maxReports, baseline, statusText };
+        return { maxReports, baseline, statusText, historySeries };
       });
 
       const bodyText = (data.statusText + " " + (await page.title())).toLowerCase();
@@ -814,6 +818,7 @@ async function evaluateDowndetector(page, slug) {
         reports: data.maxReports,
         baseline: data.baseline,
         statusText: data.statusText.substring(0, 100),
+        historySeries: data.historySeries,
         health: "ok",
         tld
       };
@@ -827,6 +832,7 @@ async function evaluateDowndetector(page, slug) {
     reports: 0,
     baseline: 0,
     statusText: "",
+    historySeries: null,
     health: `failed: ${lastError || "mesh unreachable"}`,
     tld: null
   };
@@ -900,7 +906,7 @@ async function transmitPayload(records) {
           "X-DownRadar-Secret": CONFIG.secret
         },
         body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(20000)
+        signal: AbortSignal.timeout(25000)
       });
       const respText = await res.text();
       console.log(`[Collector] [${CONFIG.runnerKey}] Ingestion response HTTP ${res.status}: ${respText.substring(0, 200)}`);
@@ -964,11 +970,13 @@ async function run() {
         breakout_terms: trends.breakouts || null,
         report_count: calculatedReports,
         baseline: dd.baseline || 0,
+        history_series: dd.historySeries || null,
         ratio: (dd.baseline > 0 && dd.reports > 0) ? +(dd.reports / dd.baseline).toFixed(2) : null,
         timestamp: Math.floor(Date.now() / 1000)
       });
 
-      console.log(`  ✓ ${target.title} (${target.slug}): DD=${dd.score} (rep:${dd.reports}, base:${dd.baseline}, "${dd.statusText}"), Trends=${trends.score}, Official=${statusScore}`);
+      const seriesNote = dd.historySeries ? ` (24h series: ${dd.historySeries.length} pts)` : "";
+      console.log(`  ✓ ${target.title} (${target.slug}): DD=${dd.score} (rep:${dd.reports}, base:${dd.baseline}, "${dd.statusText}"${seriesNote}), Trends=${trends.score}, Official=${statusScore}`);
     }
   } finally {
     await browser.close();
