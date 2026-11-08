@@ -3199,9 +3199,31 @@ async function probeGoogleTrendsExplore(browser, target, timeWindow = "now 1-H")
     await context.close().catch(() => {});
   }
 
+  // Deduplicate breakoutQueries
+  const uniqueBreakouts = [];
+  const seenQueries = new Set();
+  for (const b of breakoutQueries) {
+    const norm = b.query.toLowerCase().trim();
+    if (!seenQueries.has(norm)) {
+      seenQueries.add(norm);
+      uniqueBreakouts.push(b);
+    }
+  }
+
+  // Multi-Keyword Consensus Rule:
+  // A single search query is ambient or isolated volume; it can NEVER trigger an outage score (>=25).
+  // Elevated outage score (>=65) strictly requires >= 2 distinct concurrent breakout/rising queries.
+  if (uniqueBreakouts.length === 1) {
+    peakScore = Math.min(peakScore, 20); // Cap at 20 (Nominal Baseline)
+  } else if (uniqueBreakouts.length >= 2) {
+    peakScore = Math.max(peakScore, 75);
+  } else {
+    peakScore = 0;
+  }
+
   return {
     score: peakScore,
-    breakoutQueries,
+    breakoutQueries: uniqueBreakouts,
     confirmedErrors: [...new Set(confirmedErrors)]
   };
 }
@@ -3414,7 +3436,7 @@ async function evaluateDowndetector(slug) {
 }
 
 /**
- * Match against real-time global RSS surges
+ * Match against real-time global RSS surges with Multi-Keyword Consensus
  */
 function evaluateTrendMatch(target, activeSurges, trendsHealth = "ok") {
   if (!activeSurges || activeSurges.length === 0) {
@@ -3435,8 +3457,7 @@ function evaluateTrendMatch(target, activeSurges, trendsHealth = "ok") {
     }
   }
 
-  let bestMatch = null;
-  let bestScore = 0;
+  const matchedSurges = [];
 
   for (const s of activeSurges) {
     const rssTitle = s.title.toLowerCase().trim();
@@ -3456,17 +3477,35 @@ function evaluateTrendMatch(target, activeSurges, trendsHealth = "ok") {
 
     const hasOutageIntent = OUTAGE_PATTERNS.test(rssTitle);
     if (hasOutageIntent) {
-      const score = 80;
-      if (score > bestScore) {
-        bestScore = score;
-        bestMatch = s;
-      }
+      matchedSurges.push(s);
+    }
+  }
+
+  let bestScore = 0;
+  let bestMatch = null;
+
+  // Multi-Keyword Consensus Rule:
+  // 1 single search query is ambient or isolated volume; it can NEVER trigger an outage score (>=25).
+  // Elevated outage score (>=65) strictly requires >= 2 distinct concurrent surges.
+  if (matchedSurges.length >= 2) {
+    bestScore = 80;
+    bestMatch = matchedSurges[0];
+  } else if (matchedSurges.length === 1) {
+    const s = matchedSurges[0];
+    const trafficNum = parseInt(String(s.traffic || "").replace(/[^0-9]/g, ""), 10) || 0;
+    // Only a massive nationwide trending story (>= 50K searches) can trigger >= 65 alone
+    if (trafficNum >= 50000) {
+      bestScore = 75;
+      bestMatch = s;
+    } else {
+      bestScore = 20; // 1 single modest search surge capped at 20 (Nominal Baseline)
+      bestMatch = s;
     }
   }
 
   return {
     score: bestScore,
-    breakouts: bestMatch ? `Search Surge: ${bestMatch.title} (${bestMatch.traffic} queries)` : "",
+    breakouts: (bestMatch && bestScore >= 25) ? `Search Surge: ${bestMatch.title} (${bestMatch.traffic} queries)` : "",
     health: "ok"
   };
 }
@@ -3476,7 +3515,8 @@ async function evaluateNewsSignal(target) {
   const cleanSlug = target.slug.replace(/-/g, " ").trim().toLowerCase();
   if (!cleanTitle || cleanTitle.length < 3) return { score: 0, headline: "", ageMin: 0, health: "not_configured" };
 
-  const query = `"${cleanTitle}" (down OR outage OR "not working" OR "server issue") when:3h`;
+  // Explicit query targeting actual downtime/outage, excluding generic "not working"
+  const query = `"${cleanTitle}" (outage OR "servers down" OR "service down" OR "widespread outage") when:3h`;
   const url = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en-US&gl=US&ceid=US:en`;
 
   try {
@@ -3489,7 +3529,10 @@ async function evaluateNewsSignal(target) {
 
     const xml = await res.text();
     const itemRegex = /<item>[\s\S]*?<title>(.*?)<\/title>[\s\S]*?<pubDate>(.*?)<\/pubDate>[\s\S]*?<\/item>/g;
-    const STRICT_OUTAGE_PATTERNS = /\b(is down|are down|went down|goes down|servers? down|services? down|website down|app down|network down|outage|outages|blackout|offline|not working|downtime|unresponsive|connection issues?|server issues?|widespread issues?)\b/i;
+    
+    // Strict pattern: Must denote widespread system/platform outage, NOT tutorial, guide, or single-user trouble
+    const STRICT_OUTAGE_PATTERNS = /\b(is down|went down|servers down|server down|service down|network down|major outage|widespread outage|blackout|downtime|unresponsive)\b/i;
+    const TUTORIAL_OR_GUIDE_PATTERNS = /\b(how to|fix|fixes|why is|guide|tips|vpn not working|best vpn|troubleshoot|tutorial|reasons|workaround)\b/i;
 
     let m;
     while ((m = itemRegex.exec(xml)) !== null) {
@@ -3506,10 +3549,9 @@ async function evaluateNewsSignal(target) {
       if (!targetMatches) continue;
 
       if (BENIGN_PATTERNS.test(headline)) continue;
+      if (TUTORIAL_OR_GUIDE_PATTERNS.test(headline)) continue;
 
-      const escapedTitle = cleanTitle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const brandDownRe = new RegExp(`\\b${escapedTitle}\\s+down\\b`, "i");
-      const isOutage = STRICT_OUTAGE_PATTERNS.test(headline) || brandDownRe.test(headline);
+      const isOutage = STRICT_OUTAGE_PATTERNS.test(headline);
 
       if (isOutage) {
         const isCritical = /\b(major outage|widespread|massive|servers down|server down|offline)\b/i.test(headline);
@@ -3706,17 +3748,17 @@ async function run() {
       }
     }
 
-    // E. Google News Media Verification for high-priority or elevated services
+    // E. Google News Media Verification: Media is strictly secondary corroboration!
+    // Never allow an uncorroborated news blog post to trigger an outage score without telemetry disruption.
     let probeScore = 0;
     let probeHealth = "ok";
-    let newsHeadline = "";
 
-    if (trends.score >= 35 || isHighPriority) {
+    const hasTelemetryDisruption = (trends.score >= 35 || statusScore >= 35 || dd.score >= 35);
+    if (hasTelemetryDisruption) {
       const news = await evaluateNewsSignal(target);
       if (news.score >= 65) {
         probeScore = news.score;
         probeHealth = news.health;
-        newsHeadline = `News Alert: ${news.headline} (${news.ageMin}m ago)`;
       }
     }
 
@@ -3746,10 +3788,11 @@ async function run() {
       ? { symptoms: dd.symptoms, cities: dd.cities }
       : synthesizeSymptomsAndCities(target.slug, displayScore);
 
+    // CRITICAL: breakout_terms must ONLY contain actual search trends queries!
+    // NEVER append news headlines, alerts, or media timestamps into search breakouts.
     const allBreakouts = [
       trends.breakouts,
-      deepBreakoutTerms.join(", "),
-      newsHeadline
+      deepBreakoutTerms.join(", ")
     ].filter(Boolean).join(" | ");
 
     console.log(`  ✓ ${target.title} (${target.slug}): DD=${dd.score} (rep:${dd.reports}), Trends=${trends.score}, Official=${statusScore}, Probe=${probeScore} -> Score: ${displayScore} (rep:${calculatedReports})`);
