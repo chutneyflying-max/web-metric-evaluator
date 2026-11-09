@@ -36,7 +36,7 @@ const BENIGN_PATTERNS = /\b(download|apk|lyrics|wallpaper|guide|installer|weathe
 
 const HIGH_PRIORITY_SLUGS = new Set([
   'battlefield', 'call-of-duty', 'fortnite', 'roblox', 'discord', 'steam',
-  'openai', 'netflix', 'youtube', 'spotify', 'playstation-network', 'xbox-live',
+  'openai', 'chatgpt', 'netflix', 'youtube', 'spotify', 'playstation-network', 'xbox-live',
   'ea', 'rockstar-games', 'epic-games', 'riot-games', 'amazon', 'cloudflare',
   'spectrum', 'att', 'verizon', 't-mobile', 'comcast-xfinity',
   'world-of-warcraft', 'battle-net', 'counter-strike-2', 'destiny-2', 'genshin-impact',
@@ -2902,7 +2902,8 @@ const FALLBACK_SEED_TARGETS = [
     "id": 2018,
     "slug": "chatgpt",
     "title": "ChatGPT",
-    "statuspage_url": "",
+    "statuspage_url": "https://status.openai.com/api/v2/summary.json",
+    "downdetector_slug": "openai",
     "keywords": [
       "chatgpt",
       "chatgpt down",
@@ -3012,6 +3013,103 @@ const FALLBACK_SEED_TARGETS = [
       "proton vpn down",
       "proton mail not working"
     ]
+  },
+  {
+    "id": 2483,
+    "slug": "monday-com",
+    "title": "Monday.com",
+    "monitor_type": "hybrid",
+    "statuspage_url": "https://status.monday.com/api/v2/summary.json",
+    "geo": "US",
+    "keywords": [
+      "monday.com",
+      "monday.com down",
+      "monday.com outage",
+      "is monday.com down right now",
+      "monday.com status",
+      "monday.com login"
+    ],
+    "subreddit": "mondaydotcom"
+  },
+  {
+    "id": 2737,
+    "slug": "fedex",
+    "title": "FedEx",
+    "monitor_type": "trends_breakout",
+    "statuspage_url": "",
+    "geo": "US",
+    "keywords": [
+      "fedex",
+      "fedex down",
+      "fedex tracking down",
+      "is fedex down",
+      "fedex tracking not working",
+      "fedex ship manager down",
+      "fedex delivery delays"
+    ],
+    "subreddit": "fedex"
+  },
+  {
+    "id": 2738,
+    "slug": "ups",
+    "title": "UPS",
+    "monitor_type": "trends_breakout",
+    "statuspage_url": "",
+    "geo": "US",
+    "keywords": [
+      "ups",
+      "ups down",
+      "ups tracking down",
+      "is ups down",
+      "ups tracking not working",
+      "ups my choice down",
+      "ups delivery delays"
+    ],
+    "subreddit": "ups"
+  },
+  {
+    "slug": "verifone",
+    "name": "Verifone",
+    "domain": "verifone.com",
+    "category": "fintech",
+    "keywords": [
+      "verifone outage",
+      "verifone down",
+      "verifone payment down",
+      "verifone pos down",
+      "is verifone down"
+    ]
+  },
+  {
+    "id": 2748,
+    "slug": "bt-email",
+    "title": "BT Email",
+    "monitor_type": "trends_breakout",
+    "statuspage_url": "",
+    "geo": "GB",
+    "keywords": [
+      "bt email down",
+      "is bt email down",
+      "bt mail",
+      "bt email login",
+      "bt email"
+    ],
+    "domain": "bt.com"
+  },
+  {
+    "id": 2756,
+    "slug": "bricklink",
+    "title": "BrickLink",
+    "monitor_type": "trends_breakout",
+    "statuspage_url": "",
+    "geo": "US",
+    "keywords": [
+      "bricklink outage",
+      "is bricklink down",
+      "bricklink down",
+      "bricklink not working"
+    ],
+    "domain": "bricklink.com"
   }
 ];
 
@@ -3725,7 +3823,8 @@ async function run() {
     const statusScore = statusRes.score;
 
     // B. Fast HTTP Downdetector Probe (<100ms)
-    const dd = await evaluateDowndetector(target.slug);
+    const ddSlug = target.downdetector_slug || target.dd_slug || (target.slug === 'chatgpt' ? 'openai' : target.slug);
+    const dd = await evaluateDowndetector(ddSlug);
 
     // C. Search Trends Evaluation from Global RSS
     let trends = evaluateTrendMatch(target, allActiveSurges, trendsGlobalHealth);
