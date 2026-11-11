@@ -33,10 +33,10 @@ const OUTAGE_PATTERNS = /\b(down|is down|server down|servers down|server outage|
 const STRICT_DISCOVERY_OUTAGE_PATTERNS = /\b(down|is down|went down|servers? down|service down|network down|portal down|system down|api down|app down|website down|platform down|outage|outages|not working|crash|crashes|crashing|cannot login|login error|login failed|offline|blackout|blackouts|cyberattack)\b/i;
 const FINANCIAL_PATTERNS = /\b(stock|stocks|market|nasdaq|dow jones|trading|shares|crypto|selloff|recession|drop|halt)\b/i;
 const CONFLICT_PATTERNS = /\b(war|missile|airstrike|military|airspace|conflict|blackout|cyberattack|ceasefire|drone strike)\b/i;
-const BENIGN_PATTERNS = /\b(pizza|pizzas|pizzeria|food|foods|restaurant|restaurants|cafe|coffee|burger|burgers|taco|tacos|sushi|pasta|noodle|noodles|sandwich|sandwiches|bakery|deli|menu|recipe|recipes|delivery|takeaway|takeout|near me|nearby|closest|grocery|groceries|supermarket|ice cream|dessert|donut|bagel|download|apk|lyrics|wallpaper|guide|installer|weather|forecast|temperature|snow|rain|storm|hurricane|tornado|lottery|lotto|jackpot|result|results|draw|kerala|strike|strikes|tube strike|train strike|rail strike|walkout|protest|union|theft|robbery|police|arrest|arrested|suspect|crime|shooting|movie|trailer|box office|actor|actress|album|song|songs|dance|track|singer|artist|score|highlights|vs|match|gameplay|patch notes|update|sale|deal|price|buy|jacket|jackets|coat|coats|hoodie|pillow|pillows|feather|feathers|step down|steps down|stepping down|stepped down|stand down|stands down|standing down|stood down|go down|goes down|going down|went down|come down|comes down|coming down|sit down|sits down|sitting down|sat down|lay down|put down|puts down|calm down|calms down|upside down|hands down|run down|dress down|pinned down|pipe down|write down|breakdown of|breaking down|touch down|touchdown|takedown|take down|countdown|closing down|shut down permanently|shutting down permanently|permanent closure|permanently closed|syndrome|syndroom|lansdown|finkley|black hawk down|watership down|47 meters down|spice go down|spice go down deh|seamus o shea|josh services|josh trade|best pizza)\b/i;
+const BENIGN_PATTERNS = /\b(pizza|pizzas|pizzeria|food|foods|restaurant|restaurants|cafe|coffee|burger|burgers|taco|tacos|sushi|pasta|noodle|noodles|sandwich|sandwiches|bakery|deli|menu|recipe|recipes|delivery|takeaway|takeout|near me|nearby|closest|grocery|groceries|supermarket|ice cream|dessert|donut|bagel|download|apk|lyrics|wallpaper|guide|installer|weather|forecast|temperature|snow|rain|storm|hurricane|tornado|lottery|lotto|jackpot|result|results|draw|kerala|strike|strikes|tube strike|train strike|rail strike|walkout|protest|union|theft|robbery|police|arrest|arrested|suspect|crime|shooting|movie|trailer|box office|actor|actress|album|song|songs|dance|track|singer|artist|score|highlights|vs|match|gameplay|patch notes|update|sale|deal|price|buy|jacket|jackets|coat|coats|hoodie|pillow|pillows|feather|feathers|step down|steps down|stepping down|stepped down|stand down|stands down|standing down|stood down|go down|goes down|going down|went down|come down|comes down|coming down|sit down|sits down|sitting down|sat down|lay down|put down|puts down|calm down|calms down|upside down|hands down|run down|dress down|pinned down|pipe down|write down|breakdown of|breaking down|break down|breaks down|broken down|breakdown|lies down|lying down|lie down|touch down|touchdown|takedown|take down|countdown|closing down|shut down permanently|shutting down permanently|permanent closure|permanently closed|syndrome|syndroom|lansdown|finkley|black hawk down|watership down|47 meters down|spice go down|spice go down deh|seamus o shea|josh services|josh trade|best pizza|best pizza near|the lamb lies down on broadway|lamb lies broadway|experiencing partial)\b/i;
 
 const HIGH_PRIORITY_SLUGS = new Set([
-  'battlefield', 'call-of-duty', 'fortnite', 'roblox', 'discord', 'steam',
+  'ionos', 'battlefield', 'call-of-duty', 'fortnite', 'roblox', 'discord', 'steam',
   'openai', 'chatgpt', 'netflix', 'youtube', 'spotify', 'playstation-network', 'xbox-live',
   'ea', 'rockstar-games', 'epic-games', 'riot-games', 'amazon', 'cloudflare',
   'spectrum', 'att', 'verizon', 't-mobile', 'comcast-xfinity',
@@ -3805,17 +3805,21 @@ function evaluateTrendMatch(target, activeSurges, trendsHealth = "ok") {
   let bestMatch = null;
 
   // Multi-Keyword Consensus Rule:
-  // 1 single search query is ambient or isolated volume; it can NEVER trigger an outage score (>=25).
-  // Elevated outage score (>=65) strictly requires >= 2 distinct concurrent surges.
+  // Elevated outage score (>=65) requires >= 2 distinct concurrent surges, OR a single confirmed BREAKOUT / massive spike (>= 50K searches)
   if (matchedSurges.length >= 2) {
     bestScore = 80;
     bestMatch = matchedSurges[0];
   } else if (matchedSurges.length === 1) {
     const s = matchedSurges[0];
-    const trafficNum = parseInt(String(s.traffic || "").replace(/[^0-9]/g, ""), 10) || 0;
-    // Only a massive nationwide trending story (>= 50K searches) can trigger >= 65 alone
-    if (trafficNum >= 50000) {
-      bestScore = 75;
+    const trafficStr = String(s.traffic || "");
+    const isBreakout = /breakout|🚀/i.test(trafficStr);
+    const trafficNum = parseInt(trafficStr.replace(/[^0-9]/g, ""), 10) || 0;
+    // Confirmed Breakout (>5000% velocity) or massive nationwide trending story (>= 50K searches) triggers outage score
+    if (isBreakout || trafficNum >= 50000) {
+      bestScore = 80;
+      bestMatch = s;
+    } else if (trafficNum >= 5000) {
+      bestScore = 65;
       bestMatch = s;
     } else {
       bestScore = 20; // 1 single modest search surge capped at 20 (Nominal Baseline)
@@ -3826,7 +3830,8 @@ function evaluateTrendMatch(target, activeSurges, trendsHealth = "ok") {
   return {
     score: bestScore,
     breakouts: (bestMatch && bestScore >= 25) ? `Search Surge: ${bestMatch.title} (${bestMatch.traffic} queries)` : "",
-    health: "ok"
+    health: "ok",
+    matchCount: matchedSurges.length
   };
 }
 
@@ -4055,7 +4060,7 @@ async function run() {
 
     // D. In-Session Deep Google Trends Explore (Worldwide) for elevated, high-priority or sample targets
     const isHighPriority = HIGH_PRIORITY_SLUGS.has(target.slug);
-    const shouldExploreDeep = browser && (isHighPriority || dd.score >= 35 || statusScore >= 35 || trends.score >= 35);
+    const shouldExploreDeep = browser && (isHighPriority || dd.score >= 35 || statusScore >= 35 || trends.score >= 25 || (trends.matchCount || 0) > 0);
     let deepBreakoutTerms = [];
     let deepTopQueries = [];
     let deepBreakoutQueries = [];
