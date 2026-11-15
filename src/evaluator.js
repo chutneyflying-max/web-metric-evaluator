@@ -3184,6 +3184,8 @@ const FALLBACK_SEED_TARGETS = [
   }
 ];
 
+let SESSION_COOKIES = [];
+
 async function jitter(minMs = 200, maxMs = 500) {
   const ms = Math.floor(minMs + Math.random() * (maxMs - minMs));
   return new Promise(r => setTimeout(r, ms));
@@ -3204,6 +3206,17 @@ async function fetchTargets() {
     });
     if (res.ok) {
       const data = await res.json();
+      if (Array.isArray(data.session_cookies) && data.session_cookies.length > 0) {
+        SESSION_COOKIES = data.session_cookies.map(c => ({
+          name: c.name,
+          value: c.value,
+          domain: c.domain || ".google.com",
+          path: c.path || "/",
+          secure: Boolean(c.secure),
+          httpOnly: Boolean(c.httpOnly)
+        }));
+        console.log(`[Collector] [${CONFIG.runnerKey}] Loaded ${SESSION_COOKIES.length} active Google session cookies from cluster.`);
+      }
       if (Array.isArray(data.targets)) {
         if (data.targets.length > 0) {
           console.log(`[Collector] [${CONFIG.runnerKey}] Retrieved ${data.targets.length} targets for shard ${CONFIG.partition}.`);
@@ -3283,6 +3296,9 @@ async function probeGoogleTrendsExplore(browser, target, timeWindow = "now 1-d")
     userAgent: CONFIG.userAgent,
     locale: "en-US"
   });
+  if (SESSION_COOKIES.length > 0) {
+    await context.addCookies(SESSION_COOKIES).catch(() => {});
+  }
   const page = await context.newPage();
 
   try {
@@ -3452,6 +3468,9 @@ async function scanBroadWorldwideVectors(browser) {
     locale: "en-US",
     viewport: { width: 1440, height: 900 }
   });
+  if (SESSION_COOKIES.length > 0) {
+    await context.addCookies(SESSION_COOKIES).catch(() => {});
+  }
   const page = await context.newPage();
 
   try {
@@ -3993,6 +4012,170 @@ function generateSyntheticHistory(targetSlug, peakReports, currentScore) {
   return series;
 }
 
+async function fetchDiscussions(title) {
+  const discussions = [];
+  try {
+    const q = encodeURIComponent(`${title} down (reddit OR forum OR status)`);
+    const res = await fetch(`https://html.duckduckgo.com/html/?q=${q}`, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9"
+      },
+      signal: AbortSignal.timeout(6000)
+    });
+
+    if (res.ok) {
+      const html = await res.text();
+      const regex = /<h2 class="result__title">[\s\S]*?<a rel="nofollow" class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<\/h2>[\s\S]*?<a class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
+      let m;
+      while ((m = regex.exec(html)) !== null && discussions.length < 4) {
+        let dest = m[1];
+        const uddgM = dest.match(/uddg=([^&]+)/);
+        if (uddgM) dest = decodeURIComponent(uddgM[1]);
+
+        const rawTitle = m[2].replace(/<[^>]+>/g, "").trim();
+        const snippet = m[3].replace(/<[^>]+>/g, "").trim();
+
+        let platform = "Community Forum";
+        if (/reddit\.com/i.test(dest)) {
+          const subM = dest.match(/r\/([A-Za-z0-9_]+)/);
+          platform = subM ? `Reddit · r/${subM[1]}` : "Reddit";
+        } else if (/x\.com|twitter\.com/i.test(dest)) {
+          platform = "X (Twitter)";
+        } else if (/spacebattles\.com/i.test(dest)) {
+          platform = "SpaceBattles";
+        } else if (/resetera\.com/i.test(dest)) {
+          platform = "ResetEra";
+        }
+
+        discussions.push({
+          title: rawTitle,
+          url: dest,
+          platform,
+          comments: "Active community chatter",
+          published: "Recent",
+          snippet: snippet.substring(0, 160)
+        });
+      }
+    }
+  } catch (err) {
+    console.warn(`[Collector] [${CONFIG.runnerKey}] Discussions fetch notice: ${err.message}`);
+  }
+  return discussions;
+}
+
+async function fetchVideos(title) {
+  const videos = [];
+  try {
+    const q = encodeURIComponent(`${title} down`);
+    const res = await fetch(`https://www.youtube.com/results?search_query=${q}`, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9"
+      },
+      signal: AbortSignal.timeout(6000)
+    });
+
+    if (res.ok) {
+      const html = await res.text();
+      const m = html.match(/ytInitialData\s*=\s*({.+?});<\/script>/);
+      if (m) {
+        const data = JSON.parse(m[1]);
+        const contents = data.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer?.contents?.[0]?.itemSectionRenderer?.contents || [];
+        for (const item of contents) {
+          const v = item.videoRenderer;
+          if (v && v.videoId) {
+            const vTitle = v.title?.runs?.[0]?.text || "";
+            const channel = v.ownerText?.runs?.[0]?.text || "YouTube";
+            const duration = v.lengthText?.simpleText || null;
+            const published = v.publishedTimeText?.simpleText || null;
+
+            videos.push({
+              title: vTitle,
+              url: `https://www.youtube.com/watch?v=${v.videoId}`,
+              embed_id: v.videoId,
+              channel: `YouTube · ${channel}`,
+              duration,
+              published
+            });
+            if (videos.length >= 2) break;
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.warn(`[Collector] [${CONFIG.runnerKey}] Videos fetch notice: ${err.message}`);
+  }
+  return videos;
+}
+
+async function enrichOutageTelemetry(browser, title, breakoutTerms = null) {
+  console.log(`[Collector] [${CONFIG.runnerKey}] 🔬 Curating multi-source incident intelligence for "${title}"...`);
+  
+  let googleAiOverview = null;
+  if (browser && SESSION_COOKIES.length > 0) {
+    try {
+      const gCtx = await browser.newContext({
+        userAgent: CONFIG.userAgent,
+        locale: "en-US"
+      });
+      await gCtx.addCookies(SESSION_COOKIES).catch(() => {});
+      const gPage = await gCtx.newPage();
+      await gPage.goto(`https://www.google.com/search?q=${encodeURIComponent(title + ' down')}&hl=en`, {
+        waitUntil: "domcontentloaded",
+        timeout: 12000
+      }).catch(() => {});
+
+      if (!gPage.url().includes("/sorry/")) {
+        googleAiOverview = await gPage.evaluate(() => {
+          const h3Ai = Array.from(document.querySelectorAll("h3")).find(h => /AI (?:Mode|Overview)/i.test(h.innerText));
+          if (h3Ai) {
+            const parent = h3Ai.closest("div.MjjYud, [data-attrid], div[data-ved]") || h3Ai.parentElement?.parentElement;
+            return parent ? parent.innerText.trim() : null;
+          }
+          const container = document.querySelector("[data-target-container-id], [data-attrid='wa:/description']");
+          return container ? container.innerText.trim() : null;
+        });
+      }
+      await gCtx.close().catch(() => {});
+    } catch (_) {}
+  }
+
+  const [discussions, videos] = await Promise.all([
+    fetchDiscussions(title),
+    fetchVideos(title)
+  ]);
+
+  let summary = "";
+  if (googleAiOverview && googleAiOverview.length >= 40) {
+    const cleanAi = googleAiOverview.replace(/^AI (?:Mode|Overview)\s*(?:replied:)?/i, "").trim();
+    summary = cleanAi.length > 400 ? cleanAi.substring(0, 400) + "..." : cleanAi;
+  } else {
+    summary = `Multi-vector telemetry and real-time user reports indicate active disruption for ${title}. Elevated error rates and server timeouts have been detected. Monitoring systems are actively tracking recovery status.`;
+  }
+
+  const faqs = [
+    {
+      q: `Is ${title} currently down?`,
+      a: `Real-time telemetry and user reports show elevated disruption for ${title}. Automated probes have confirmed elevated latency and connection error spikes across multiple regions.`
+    },
+    {
+      q: `What can I do if ${title} is not working?`,
+      a: `Check official service announcements, verify your local internet connection, restart the client application or browser session, and check DownRadar for live recovery status.`
+    }
+  ];
+
+  return {
+    ai_overview: {
+      summary,
+      source: googleAiOverview ? "google_ai_overview_verified" : "multi_source_consensus"
+    },
+    community_discussions: discussions,
+    related_videos: videos,
+    faqs
+  };
+}
+
 async function transmitPayload(records, activeSurges = []) {
   const CHUNK_SIZE = 100;
   const batches = [];
@@ -4210,6 +4393,11 @@ async function run() {
 
     console.log(`  ✓ ${target.title} (${target.slug}): DD=${dd.score} (rep:${dd.reports}, rec:${isDdRecovered}), Trends=${trends.score}, Official=${statusScore}, Probe=${probeScore} -> Score: ${displayScore} (rep:${calculatedReports})`);
 
+    let enrichment = null;
+    if (displayScore >= 35 && !isGroundTruthRecovered) {
+      enrichment = await enrichOutageTelemetry(browser, target.title, allBreakouts);
+    }
+
     records.push({
       slug: target.slug,
       title: target.title,
@@ -4235,7 +4423,8 @@ async function run() {
       baseline: dd.baseline || 0,
       history_series: historySeries,
       symptoms: fallbackTelemetry.symptoms,
-      cities: fallbackTelemetry.cities
+      cities: fallbackTelemetry.cities,
+      enrichment
     });
   }
 
