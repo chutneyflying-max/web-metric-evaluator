@@ -4067,7 +4067,8 @@ async function fetchDiscussions(title) {
 async function fetchVideos(title) {
   const videos = [];
   try {
-    const q = encodeURIComponent(`${title} down`);
+    const cleanTitle = (title || "").replace(/\s*\(.*?\)\s*/g, " ").trim();
+    const q = encodeURIComponent(`${cleanTitle} servers down fix`);
     const res = await fetch(`https://www.youtube.com/results?search_query=${q}`, {
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
@@ -4089,6 +4090,22 @@ async function fetchVideos(title) {
             const channel = v.ownerText?.runs?.[0]?.text || "YouTube";
             const duration = v.lengthText?.simpleText || null;
             const published = v.publishedTimeText?.simpleText || null;
+
+            const tLow = vTitle.toLowerCase();
+            const pLow = (published || "").toLowerCase();
+
+            // Discard drama, satire, documentaries, reviews, memes
+            if (/\b(destroyed|pure evil|shuts down|shut down|history of|rise and fall|worst company|review|gameplay|walkthrough|speedrun|trailer|parody|meme|memes|unboxing|reaction|tier list)\b/.test(tLow)) {
+              continue;
+            }
+            // Must mention server/connection/outage/fix
+            if (!/\b(outage|down|server|servers|connection|connect|offline|crash|error|unable to connect|cannot connect|cant connect|not working|maintenance|status|incident|broken|fix|issues?|problems?)\b/.test(tLow)) {
+              continue;
+            }
+            // Discard older than 30d (years or multiple months)
+            if (/\b\d+\s*(y|yr|year|years)\b/.test(pLow) || /\b([2-9]|1[0-2])\s*(mo|month|months)\b/.test(pLow) || /\b([5-9]|[1-9]\d)\s*(w|week|weeks)\b/.test(pLow)) {
+              continue;
+            }
 
             videos.push({
               title: vTitle,
