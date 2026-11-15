@@ -29,13 +29,21 @@ const CONFIG = {
   runnerKey: "web-metric-runner",
   partition: parseInt(process.env.PARTITION_ID || "1", 10),
   totalPartitions: parseInt(process.env.TOTAL_PARTITIONS || "1", 10),
-  timeWindow: process.env.TIME_WINDOW || "now 1-H",
+  timeWindow: process.env.TIME_WINDOW || "now 1-d",
   userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 };
 
-const OUTAGE_PATTERNS = /\b(down|is down|server down|servers down|server outage|outage|not working|crash|cannot login|login error|offline|error|failed|maintenance)\b/i;
-const STRICT_DISCOVERY_OUTAGE_PATTERNS = /\b(down|is down|went down|servers? down|service down|network down|portal down|system down|api down|app down|website down|platform down|outage|outages|not working|crash|crashes|crashing|cannot login|login error|login failed|offline|maintenance)\b/i;
-const BENIGN_PATTERNS = /\b(war|missile|airstrike|military|airspace|ceasefire|stock|stocks|nasdaq|dow jones|trading halted|market crash|crypto crash|shares|selloff|recession|pizza|pizzas|pizzeria|food|foods|restaurant|restaurants|cafe|coffee|burger|burgers|taco|tacos|sushi|pasta|noodle|noodles|sandwich|sandwiches|bakery|deli|menu|recipe|recipes|delivery|takeaway|takeout|near me|nearby|closest|grocery|groceries|supermarket|ice cream|dessert|donut|bagel|download|apk|lyrics|wallpaper|guide|installer|weather|forecast|temperature|snow|rain|storm|hurricane|tornado|lottery|lotto|jackpot|result|results|draw|kerala|strike|strikes|tube strike|train strike|rail strike|walkout|protest|union|theft|robbery|police|arrest|arrested|suspect|crime|shooting|movie|trailer|box office|actor|actress|album|song|songs|dance|track|singer|artist|score|highlights|vs|match|gameplay|patch notes|update|sale|deal|price|buy|jacket|jackets|coat|coats|hoodie|pillow|pillows|feather|feathers|step down|steps down|stepping down|stepped down|stand down|stands down|standing down|stood down|go down|goes down|going down|went down|come down|comes down|coming down|sit down|sits down|sitting down|sat down|lay down|put down|puts down|calm down|calms down|upside down|hands down|run down|dress down|pinned down|pipe down|write down|breakdown of|breaking down|break down|breaks down|broken down|breakdown|lies down|lying down|lie down|touch down|touchdown|takedown|take down|countdown|closing down|shut down permanently|shutting down permanently|permanent closure|permanently closed|syndrome|syndroom|lansdown|finkley|black hawk down|watership down|47 meters down|spice go down|spice go down deh|seamus o shea|josh services|josh trade|best pizza|best pizza near|the lamb lies down on broadway|lamb lies broadway|experiencing partial)\b/i;
+const OUTAGE_PATTERNS = /\b(down|is down|server down|servers down|server outage|outage|outages|not working|crash|cannot login|login error|offline|error|failed|maintenance|blackout|blackouts|power cut|power cuts|electric outage|grid down|load shedding)\b/i;
+const STRICT_DISCOVERY_OUTAGE_PATTERNS = /\b(down|is down|went down|servers? down|service down|network down|portal down|system down|api down|app down|website down|platform down|outage|outages|blackout|blackouts|power cut|power cuts|electric outage|grid down|load shedding|not working|crash|crashes|crashing|cannot login|login error|login failed|offline|maintenance)\b/i;
+const BENIGN_PATTERNS = /\b(war|missile|airstrike|military|airspace|ceasefire|stock|stocks|nasdaq|dow jones|trading halted|market crash|crypto crash|shares|selloff|recession|pizza|pizzas|pizzeria|food|foods|restaurant|restaurants|cafe|coffee|burger|burgers|taco|tacos|sushi|pasta|noodle|noodles|sandwich|sandwiches|bakery|deli|menu|recipe|recipes|delivery|takeaway|takeout|near me|nearby|closest|grocery|groceries|supermarket|ice cream|dessert|donut|bagel|download|apk|lyrics|wallpaper|guide|installer|lottery|lotto|jackpot|result|results|draw|kerala|strike|strikes|tube strike|train strike|rail strike|walkout|protest|union|theft|robbery|police|arrest|arrested|suspect|crime|shooting|movie|trailer|box office|actor|actress|album|song|songs|dance|track|singer|artist|score|highlights|vs|match|gameplay|patch notes|update|sale|deal|price|buy|jacket|jackets|coat|coats|hoodie|pillow|pillows|feather|feathers|step down|steps down|stepping down|stepped down|stand down|stands down|standing down|stood down|go down|goes down|going down|went down|come down|comes down|coming down|sit down|sits down|sitting down|sat down|lay down|put down|puts down|calm down|calms down|upside down|hands down|run down|dress down|pinned down|pipe down|write down|breakdown of|breaking down|break down|breaks down|broken down|breakdown|lies down|lying down|lie down|touch down|touchdown|takedown|take down|countdown|closing down|shut down permanently|shutting down permanently|permanent closure|permanently closed|syndrome|syndroom|lansdown|finkley|black hawk down|watership down|47 meters down|spice go down|spice go down deh|seamus o shea|josh services|josh trade|best pizza|best pizza near|the lamb lies down on broadway|lamb lies broadway|experiencing partial)\b/i;
+
+function isBenignQuery(q) {
+  if (!q) return true;
+  if (/\b(power outage|blackout|blackouts|power cut|power cuts|electric outage|grid down|grid outage|outage map)\b/i.test(q)) {
+    return false;
+  }
+  return BENIGN_PATTERNS.test(q);
+}
 
 const HIGH_PRIORITY_SLUGS = new Set([
   'ionos', 'battlefield', 'call-of-duty', 'fortnite', 'roblox', 'discord', 'steam',
@@ -44,13 +52,14 @@ const HIGH_PRIORITY_SLUGS = new Set([
   'spectrum', 'att', 'verizon', 't-mobile', 'comcast-xfinity',
   'world-of-warcraft', 'battle-net', 'counter-strike-2', 'destiny-2', 'genshin-impact',
   'the-sims-4', 'dead-by-daylight', 'pubg', 'ea-sports-fc', 'warframe', 'dota-2',
-  'final-fantasy-xiv', 'escape-from-tarkov', 'clash-of-clans', 'clash-royale'
+  'final-fantasy-xiv', 'escape-from-tarkov', 'clash-of-clans', 'clash-royale',
+  'power-grid-utilities'
 ]);
 
 // Broad failure & breaking news query vectors monitored worldwide (8 vectors combined)
 const BROAD_FAILURE_VECTORS = [
   "down", "outage", "not working", "login error",
-  "failure", "maintenance", "failed", "crash"
+  "power outage", "blackout", "power cut", "crash"
 ];
 
 const FALLBACK_SEED_TARGETS = [
@@ -310,7 +319,7 @@ const FALLBACK_SEED_TARGETS = [
     "id": 28,
     "slug": "roblox",
     "title": "Roblox",
-    "statuspage_url": "https://status.roblox.com/api/v2/summary.json",
+    "statuspage_url": "https://api.status.io/1.0/status/59db90dbcdeb2f04dadcf16d",
     "keywords": [
       "roblox",
       "roblox down",
@@ -911,9 +920,11 @@ const FALLBACK_SEED_TARGETS = [
     "statuspage_url": "",
     "keywords": [
       "power outage",
-      "power grid",
-      "electric outage",
       "blackout",
+      "power cut",
+      "electric outage",
+      "power grid",
+      "outage map",
       "enmax",
       "dte",
       "georgia power",
@@ -3257,7 +3268,7 @@ async function fetchGlobalTrendsRss() {
  * In-Session Google Trends Explore Engine (Worldwide & Target-Specific)
  * Batches target keywords into a single comparison probe for maximum speed and rich Top/Rising telemetry
  */
-async function probeGoogleTrendsExplore(browser, target, timeWindow = "now 1-H") {
+async function probeGoogleTrendsExplore(browser, target, timeWindow = "now 1-d") {
   const keywords = (target.keywords && target.keywords.length > 0) ? target.keywords : [target.slug];
   // Default to Worldwide (empty geo: "") or target-specific geo
   const geo = target.geo || "";
@@ -3275,14 +3286,16 @@ async function probeGoogleTrendsExplore(browser, target, timeWindow = "now 1-H")
   const page = await context.newPage();
 
   try {
-    const exploreBaseUrl = geo
-      ? `https://trends.google.com/trends/explore?geo=${encodeURIComponent(geo)}&hl=en-US&legacy`
-      : `https://trends.google.com/trends/explore?hl=en-US&legacy`;
+    const chunk = keywords.slice(0, 5);
+    const encodedChunk = chunk.map(k => encodeURIComponent(k)).join("%2C");
+    const exploreBaseUrl = (geo && geo !== "GLOBAL" && geo !== "WORLDWIDE")
+      ? `https://trends.google.com/explore?q=${encodedChunk}&geo=${encodeURIComponent(geo)}&date=${encodeURIComponent(time)}`
+      : `https://trends.google.com/explore?q=${encodedChunk}&date=${encodeURIComponent(time)}`;
 
     await page.goto(exploreBaseUrl, {
       waitUntil: "domcontentloaded",
       timeout: 20000
-    });
+    }).catch(() => {});
 
     try {
       const consentBtn = page.locator('button:has-text("Accept all"), button:has-text("Reject all")').first();
@@ -3292,14 +3305,13 @@ async function probeGoogleTrendsExplore(browser, target, timeWindow = "now 1-H")
       }
     } catch (_) {}
 
-    // Batch candidate keywords together (up to 5 keywords in 1 single compare call)
-    const chunk = keywords.slice(0, 5);
+    // Chunk of candidate keywords (up to 5 keywords in 1 compare probe)
     try {
       const result = await page.evaluate(async ({ chunk, geo, time }) => {
         const stripHeaders = (t) => t.replace(/^\)\]\}'[^\n]*\n/, '');
 
         const exploreReq = {
-          comparisonItem: chunk.map(k => ({ keyword: k, geo: geo || '', time: time || 'now 1-H' })),
+          comparisonItem: chunk.map(k => ({ keyword: k, geo: geo || '', time: time || 'now 1-d' })),
           category: 0,
           property: ''
         };
@@ -3341,7 +3353,7 @@ async function probeGoogleTrendsExplore(browser, target, timeWindow = "now 1-H")
         // 1. Process Rising queries (breakouts)
         for (const item of (lists.rising || [])) {
           const query = (item.query || '').trim();
-          if (!query || BENIGN_PATTERNS.test(query)) continue;
+          if (!query || isBenignQuery(query)) continue;
 
           const isSpike = item.formattedValue === 'Breakout' || (typeof item.value === 'number' && item.value >= 1000);
 
@@ -3363,7 +3375,7 @@ async function probeGoogleTrendsExplore(browser, target, timeWindow = "now 1-H")
         // 2. Process Top queries
         for (const item of (lists.top || [])) {
           const query = (item.query || '').trim();
-          if (!query || BENIGN_PATTERNS.test(query)) continue;
+          if (!query || isBenignQuery(query)) continue;
 
           const errMatch = query.match(/\b(error\s?\d{3,5}|HTTP\s?\d{3}|code\s?\d{3,5}|ERR_[A-Z_]+|websocket_\w+|\d{4}[A-Z]?)\b/i);
           if (errMatch) {
@@ -3409,12 +3421,14 @@ async function probeGoogleTrendsExplore(browser, target, timeWindow = "now 1-H")
   }
 
   // Multi-Keyword Consensus Rule:
-  // A single search query is ambient or isolated volume; it can NEVER trigger an outage score (>=25).
-  // Elevated outage score (>=65) strictly requires >= 2 distinct concurrent breakout/rising queries.
+  // A single search query is ambient or isolated volume; it can NEVER trigger an outage score (>=25)
+  // unless confirmed by high breakout velocity (>= +1,000%) or corroborated by multiple keywords.
   if (uniqueBreakouts.length === 1) {
-    peakScore = Math.min(peakScore, 20); // Cap at 20 (Nominal Baseline)
+    const singleB = uniqueBreakouts[0];
+    const isExtremeVelocity = singleB.isBreakout || (typeof singleB.value === 'number' && singleB.value >= 1000);
+    peakScore = isExtremeVelocity ? 45 : 20; // 45 holds in elevated monitoring/warning, 20 is nominal baseline
   } else if (uniqueBreakouts.length >= 2) {
-    peakScore = Math.max(peakScore, 75);
+    peakScore = Math.max(peakScore, 85);
   } else {
     peakScore = 0;
   }
@@ -3445,7 +3459,7 @@ async function scanBroadWorldwideVectors(browser) {
     const encodedQ = BROAD_FAILURE_VECTORS
       .map(t => encodeURIComponent(t).replace(/%20/g, "%2520"))
       .join("%2C");
-    const modernUrl = `https://trends.google.com/explore?q=${encodedQ}&date=now%201-h`;
+    const modernUrl = `https://trends.google.com/explore?q=${encodedQ}&date=now%201-d`;
 
     await page.goto(modernUrl, { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {});
 
@@ -3494,7 +3508,7 @@ async function scanBroadWorldwideVectors(browser) {
             for (const row of (scraped.rising || [])) {
               const q = (row[1] || '').trim();
               const traffic = row[2] || 'Breakout 🚀';
-              if (q && !BENIGN_PATTERNS.test(q) && STRICT_DISCOVERY_OUTAGE_PATTERNS.test(q)) {
+              if (q && !isBenignQuery(q) && STRICT_DISCOVERY_OUTAGE_PATTERNS.test(q)) {
                 discoveredSurges.push({ title: q, traffic, geo: 'GLOBAL', type: 'rising', seed: term });
               }
             }
@@ -3502,7 +3516,7 @@ async function scanBroadWorldwideVectors(browser) {
             for (const row of (scraped.top || [])) {
               const q = (row[1] || '').trim();
               const traffic = row[2] || '+50%';
-              if (q && !BENIGN_PATTERNS.test(q) && STRICT_DISCOVERY_OUTAGE_PATTERNS.test(q)) {
+              if (q && !isBenignQuery(q) && STRICT_DISCOVERY_OUTAGE_PATTERNS.test(q)) {
                 discoveredSurges.push({ title: q, traffic, geo: 'GLOBAL', type: 'top', seed: term });
               }
             }
@@ -3517,7 +3531,7 @@ async function scanBroadWorldwideVectors(browser) {
 
     // 2. In-Session Batched API Fallback (runs if modern UI didn't produce queries)
     if (!modernSuccess || discoveredSurges.length === 0) {
-      await page.goto("https://trends.google.com/trends/explore?hl=en-US&legacy", {
+      await page.goto("https://trends.google.com/trends/explore?hl=en-US", {
         waitUntil: "domcontentloaded",
         timeout: 15000
       }).catch(() => {});
@@ -3533,7 +3547,7 @@ async function scanBroadWorldwideVectors(browser) {
           const result = await page.evaluate(async ({ chunk }) => {
             const stripHeaders = (t) => t.replace(/^\)\]\}'[^\n]*\n/, '');
             const exploreReq = {
-              comparisonItem: chunk.map(v => ({ keyword: v, geo: '', time: 'now 1-H' })),
+              comparisonItem: chunk.map(v => ({ keyword: v, geo: '', time: 'now 1-d' })),
               category: 0,
               property: ''
             };
@@ -3563,7 +3577,7 @@ async function scanBroadWorldwideVectors(browser) {
           for (const [seedKw, lists] of Object.entries(result.itemsByKeyword || {})) {
             for (const it of (lists.rising || [])) {
               const q = (it.query || '').trim();
-              if (!q || BENIGN_PATTERNS.test(q)) continue;
+              if (!q || isBenignQuery(q)) continue;
               if (STRICT_DISCOVERY_OUTAGE_PATTERNS.test(q)) {
                 discoveredSurges.push({
                   title: q,
@@ -3576,7 +3590,7 @@ async function scanBroadWorldwideVectors(browser) {
             }
             for (const it of (lists.top || [])) {
               const q = (it.query || '').trim();
-              if (!q || BENIGN_PATTERNS.test(q)) continue;
+              if (!q || isBenignQuery(q)) continue;
               if (STRICT_DISCOVERY_OUTAGE_PATTERNS.test(q)) {
                 discoveredSurges.push({
                   title: q,
@@ -3615,12 +3629,22 @@ async function evaluateStatuspage(url) {
     const res = await fetch(url, { signal: AbortSignal.timeout(4000) });
     if (res.ok) {
       const json = await res.json();
+      // Support Status.io
+      if (json.result?.status_overall) {
+        const sc = json.result.status_overall.status_code;
+        let score = 0;
+        if (sc >= 500) score = 100;
+        else if (sc >= 400) score = 80;
+        else if (sc >= 300) score = 35;
+        return { score, health: "ok", indicator: json.result.status_overall.status, isResolved: score === 0 };
+      }
+      // Support Statuspage.io (Atlassian)
       const indicator = json.status?.indicator || "none";
       let score = 0;
       if (indicator === "critical") score = 100;
       else if (indicator === "major") score = 80;
       else if (indicator === "minor") score = 35;
-      return { score, health: "ok", indicator };
+      return { score, health: "ok", indicator, isResolved: score === 0 };
     }
     return { score: 0, health: `http_${res.status}` };
   } catch (e) {
@@ -3713,21 +3737,34 @@ async function evaluateExternalTelemetry(slug) {
       const latestBaseline = latestPoint.b || 0;
       const baseForRatio = Math.max(1, latestBaseline || baseline);
       const peakRatio = recentPeak / baseForRatio;
+      const latestRatio = (latestPoint.v || 0) / baseForRatio;
 
       let score = 0;
+      let isRecovered = false;
+      const hadRecentOutage = (recentPeak >= 80 && peakRatio >= 2.8);
       const stLower = (statusText || "").toLowerCase();
       if (stLower === "danger") {
         score = 85;
       } else if (stLower === "warning") {
         score = 70;
       } else if (stLower === "success") {
-        if (recentPeak >= 300 && peakRatio >= 5.0) {
-          score = 75;
+        // Fast Recovery Ground Truth:
+        // When Downdetector had a recent outage (recentPeak >= 80) and latest reports have subsided to baseline (<= 2.2x),
+        // Downdetector is confirming the service has recovered! Score is 0 and isRecovered flag is set.
+        if (hadRecentOutage && latestRatio <= 2.2) {
+          score = 0;
+          isRecovered = true;
+        } else if (latestRatio > 3.0 && peakRatio >= 5.0) {
+          score = 50; // Minor lingering tail if latest reports are still elevated
         } else {
           score = 0;
+          isRecovered = false; // Normal nominal baseline
         }
       } else {
-        if (recentPeak >= 100 && peakRatio >= 4.0) score = 80;
+        if (latestRatio <= 1.8 && recentPeak < 100) {
+          score = 0;
+          isRecovered = false;
+        } else if (recentPeak >= 100 && peakRatio >= 4.0) score = 80;
         else if (recentPeak >= 50 && peakRatio >= 3.0) score = 65;
         else if (recentPeak >= 30 && peakRatio >= 2.5) score = 40;
         else score = 0;
@@ -3735,13 +3772,14 @@ async function evaluateExternalTelemetry(slug) {
 
       return {
         score,
-        reports: score > 0 ? recentPeak : (latestPoint.v || 0),
+        reports: score > 0 ? (latestPoint.v > baseForRatio * 2.0 ? latestPoint.v : recentPeak) : (latestPoint.v || 0),
         baseline: latestBaseline || baseline,
         statusText: statusText,
         historySeries: historySeries,
         symptoms: symptoms,
         cities: cities,
         health: "ok",
+        isRecovered,
         tld
       };
     }
@@ -3782,7 +3820,7 @@ function evaluateTrendMatch(target, activeSurges, trendsHealth = "ok") {
 
   for (const s of activeSurges) {
     const rssTitle = s.title.toLowerCase().trim();
-    if (BENIGN_PATTERNS.test(rssTitle)) continue;
+    if (isBenignQuery(rssTitle)) continue;
 
     let matchedPhrase = null;
     for (const phrase of candidatePhrases) {
@@ -3874,7 +3912,7 @@ async function evaluateNewsSignal(target) {
                             (cleanSlug.length >= 3 && headlineLower.includes(cleanSlug));
       if (!targetMatches) continue;
 
-      if (BENIGN_PATTERNS.test(headline)) continue;
+      if (isBenignQuery(headline)) continue;
       if (TUTORIAL_OR_GUIDE_PATTERNS.test(headline)) continue;
 
       const isOutage = STRICT_OUTAGE_PATTERNS.test(headline);
@@ -3956,54 +3994,78 @@ function generateSyntheticHistory(targetSlug, peakReports, currentScore) {
 }
 
 async function transmitPayload(records, activeSurges = []) {
-  const payload = {
-    pipeline_provenance: {
-      runner: CONFIG.runnerKey,
-      runner_key: CONFIG.runnerKey,
-      partition: CONFIG.partition,
-      total_partitions: CONFIG.totalPartitions,
-      timestamp: Math.floor(Date.now() / 1000)
-    },
-    services: records,
-    explore_trends: (activeSurges || []).map(s => ({
-      query: s.title,
-      traffic: s.traffic,
-      geo: s.geo || "GLOBAL",
-      type: s.type || "rising",
-      seed_keyword: s.seed || null,
-      source_channel: "playwright_explore_swarm",
-      source: CONFIG.runnerKey
-    }))
-  };
-
-  const highImpact = records.filter(r => (r.signals.dd >= 35 || r.signals.trends >= 35 || r.signals.official >= 35 || r.signals.probe >= 35));
-  console.log(`[Collector] [${CONFIG.runnerKey}] Transmitting ${records.length} service records (${highImpact.length} active disruptions) to: ${CONFIG.endpoint}ingest`);
-
-  let lastError = null;
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      const res = await fetch(`${CONFIG.endpoint}ingest`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Telemetry-Auth": CONFIG.secret,
-          [Buffer.from("WC1Eb3duUmFkYXItU2VjcmV0", "base64").toString("utf8")]: CONFIG.secret
-        },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(45000)
+  const CHUNK_SIZE = 100;
+  const batches = [];
+  
+  if (!records || records.length === 0) {
+    batches.push({ records: [], surges: activeSurges || [] });
+  } else {
+    for (let i = 0; i < records.length; i += CHUNK_SIZE) {
+      batches.push({
+        records: records.slice(i, i + CHUNK_SIZE),
+        surges: (i === 0) ? (activeSurges || []) : []
       });
-      const respText = await res.text();
-      console.log(`[Collector] [${CONFIG.runnerKey}] Ingestion response HTTP ${res.status}: ${respText.substring(0, 200)}`);
-      if (res.ok) return;
-      lastError = new Error(`Ingestion HTTP ${res.status}: ${respText.substring(0, 100)}`);
-    } catch (e) {
-      lastError = e;
-      console.warn(`[Collector] [${CONFIG.runnerKey}] Ingestion attempt ${attempt} error: ${e.message}`);
     }
-    if (attempt < 3) await jitter(2000, 4000);
   }
 
-  throw lastError || new Error(`[Collector] [${CONFIG.runnerKey}] Ingestion failed after 3 attempts`);
+  for (let bIdx = 0; bIdx < batches.length; bIdx++) {
+    const { records: batchRecords, surges: batchSurges } = batches[bIdx];
+    const payload = {
+      pipeline_provenance: {
+        runner: CONFIG.runnerKey,
+        runner_key: CONFIG.runnerKey,
+        partition: CONFIG.partition,
+        total_partitions: CONFIG.totalPartitions,
+        batch_index: bIdx + 1,
+        total_batches: batches.length,
+        timestamp: Math.floor(Date.now() / 1000)
+      },
+      services: batchRecords,
+      explore_trends: (batchSurges || []).map(s => ({
+        query: s.title,
+        traffic: s.traffic,
+        geo: s.geo || "GLOBAL",
+        type: s.type || "rising",
+        seed_keyword: s.seed || null,
+        source_channel: "playwright_explore_swarm",
+        source: CONFIG.runnerKey
+      }))
+    };
+
+    const highImpact = batchRecords.filter(r => (r.signals.dd >= 35 || r.signals.trends >= 35 || r.signals.official >= 35 || r.signals.probe >= 35));
+    console.log(`[Collector] [${CONFIG.runnerKey}] Transmitting batch ${bIdx + 1}/${batches.length}: ${batchRecords.length} records (${highImpact.length} active disruptions, ${batchSurges.length} trends) to: ${CONFIG.endpoint}ingest`);
+
+    let lastError = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const res = await fetch(`${CONFIG.endpoint}ingest`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Telemetry-Auth": CONFIG.secret,
+            [Buffer.from("WC1Eb3duUmFkYXItU2VjcmV0", "base64").toString("utf8")]: CONFIG.secret
+          },
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(45000)
+        });
+        const respText = await res.text();
+        console.log(`[Collector] [${CONFIG.runnerKey}] Ingestion response HTTP ${res.status}: ${respText.substring(0, 200)}`);
+        if (res.ok) {
+          lastError = null;
+          break;
+        }
+        lastError = new Error(`Ingestion HTTP ${res.status}: ${respText.substring(0, 100)}`);
+      } catch (e) {
+        lastError = e;
+        console.warn(`[Collector] [${CONFIG.runnerKey}] Ingestion attempt ${attempt} error: ${e.message}`);
+      }
+      if (attempt < 3) await jitter(2000, 4000);
+    }
+
+    if (lastError) {
+      throw lastError;
+    }
+  }
 }
 
 async function run() {
@@ -4102,7 +4164,18 @@ async function run() {
       }
     }
 
-    const displayScore = Math.max(dd.score, trends.score, statusScore, probeScore);
+    // Fast Recovery Determination (Downdetector or Official Statuspage confirmed recovery from a prior outage)
+    const isDdRecovered = dd.health === "ok" && Boolean(dd.isRecovered);
+    const isOfficialResolved = Boolean(target.statuspage_url && statusRes.health === "ok" && statusRes.isResolved && statusScore === 0);
+    const isGroundTruthRecovered = isDdRecovered || isOfficialResolved;
+
+    // ASYMMETRIC RECOVERY:
+    // If Downdetector or Official Statuspage confirms recovery, immediately suppress the trailing Google Trends 1-hour window!
+    if (isGroundTruthRecovered) {
+      trends.score = 0;
+    }
+
+    const displayScore = isGroundTruthRecovered ? 0 : Math.max(dd.score, trends.score, statusScore, probeScore);
 
     // Normalizing reports count
     const calculatedReports = displayScore === 0
@@ -4120,9 +4193,9 @@ async function run() {
         ? "telemetry_rsc"
         : (displayScore >= 35 ? "estimated_from_search_velocity" : "nominal_baseline"));
 
-    const historySeries = dd.historySeries || (displayScore >= 35 && calculatedReports >= 50
-      ? generateSyntheticHistory(target.slug, calculatedReports, displayScore)
-      : null);
+    const historySeries = (dd.historySeries && dd.historySeries.length > 0)
+      ? dd.historySeries
+      : null;
 
     const fallbackTelemetry = (dd.symptoms && dd.symptoms.length > 0)
       ? { symptoms: dd.symptoms, cities: dd.cities }
@@ -4130,16 +4203,18 @@ async function run() {
 
     // CRITICAL: breakout_terms must ONLY contain actual search trends queries!
     // NEVER append news headlines, alerts, or media timestamps into search breakouts.
-    const allBreakouts = [
+    const allBreakouts = isGroundTruthRecovered ? "" : [
       trends.breakouts,
       deepBreakoutTerms.join(", ")
     ].filter(Boolean).join(" | ");
 
-    console.log(`  ✓ ${target.title} (${target.slug}): DD=${dd.score} (rep:${dd.reports}), Trends=${trends.score}, Official=${statusScore}, Probe=${probeScore} -> Score: ${displayScore} (rep:${calculatedReports})`);
+    console.log(`  ✓ ${target.title} (${target.slug}): DD=${dd.score} (rep:${dd.reports}, rec:${isDdRecovered}), Trends=${trends.score}, Official=${statusScore}, Probe=${probeScore} -> Score: ${displayScore} (rep:${calculatedReports})`);
 
     records.push({
       slug: target.slug,
       title: target.title,
+      ground_truth_recovered: isGroundTruthRecovered,
+      is_recovered: isGroundTruthRecovered,
       signals: {
         dd: dd.score,
         trends: trends.score,
