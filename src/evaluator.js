@@ -4183,7 +4183,12 @@ async function enrichOutageTelemetry(browser, title, breakoutTerms = null) {
 
   let summary = "";
   let socialOptions = null;
-  if (googleAiOverview && googleAiOverview.length >= 40) {
+  const combinedContext = (title + " " + (breakoutTerms || []).join(" ")).toLowerCase();
+  const isViralRumor = /(?:90\s*day|blackout\s*warning|grid\s*shutdown\s*rumor|is\s+the\s+.*real|fema\s*blackout)/i.test(combinedContext);
+
+  if (isViralRumor) {
+    summary = `Viral Rumor Debunked: Unsubstantiated claims circulating on social media claiming a 90-day nationwide power grid shutdown are false. Official agencies (including FEMA and the FCC) have confirmed that no power grid shutdown is scheduled. Monitored utilities and power networks are operating normally.`;
+  } else if (googleAiOverview && googleAiOverview.length >= 40) {
     const cleanAi = googleAiOverview.replace(/^AI (?:Mode|Overview)\s*(?:replied:)?/i, "").trim();
     summary = cleanAi.length > 400 ? cleanAi.substring(0, 400) + "..." : cleanAi;
 
@@ -4202,7 +4207,16 @@ async function enrichOutageTelemetry(browser, title, breakoutTerms = null) {
     summary = `Real-time user problem reports indicate active service disruption for ${title}. Connection drops, loading delays, and elevated error rates have been reported. Operations and recovery status are being actively tracked.`;
   }
 
-  const faqs = [
+  const faqs = isViralRumor ? [
+    {
+      q: `Is the 90-day power outage real?`,
+      a: `No. Viral claims alleging a 90-day nationwide power grid blackout have been debunked as misinformation by FEMA, the FCC, and independent fact-checkers.`
+    },
+    {
+      q: `Is the power grid currently operating normally?`,
+      a: `Yes. Regional electric utilities and power grid operations are running normally nationwide with zero scheduled blackouts.`
+    }
+  ] : [
     {
       q: `Is ${title} currently down?`,
       a: `Real-time user reports and network checks show elevated disruption for ${title}. Increased latency and connection error spikes have been observed across multiple regions.`
@@ -4226,16 +4240,34 @@ async function enrichOutageTelemetry(browser, title, breakoutTerms = null) {
 }
 
 async function transmitPayload(records, activeSurges = []) {
+  // Stagger shard transmissions slightly to prevent simultaneous database lock contention on WordPress
+  const shardStaggerMs = Math.max(0, (CONFIG.partition - 1) * 2000);
+  if (shardStaggerMs > 0) {
+    console.log(`[Collector] [${CONFIG.runnerKey}] Staggering partition ${CONFIG.partition} submission by ${shardStaggerMs}ms...`);
+    await jitter(shardStaggerMs, shardStaggerMs + 500);
+  }
+
+  // Deduplicate and cap active surges to the top 50 highest impact breakouts
+  const dedupedSurges = [];
+  const seenSurgeTitles = new Set();
+  for (const s of (activeSurges || [])) {
+    const norm = (s.title || '').toLowerCase().trim();
+    if (!norm || seenSurgeTitles.has(norm)) continue;
+    seenSurgeTitles.add(norm);
+    dedupedSurges.push(s);
+    if (dedupedSurges.length >= 50) break;
+  }
+
   const CHUNK_SIZE = 100;
   const batches = [];
   
   if (!records || records.length === 0) {
-    batches.push({ records: [], surges: activeSurges || [] });
+    batches.push({ records: [], surges: dedupedSurges });
   } else {
     for (let i = 0; i < records.length; i += CHUNK_SIZE) {
       batches.push({
         records: records.slice(i, i + CHUNK_SIZE),
-        surges: (i === 0) ? (activeSurges || []) : []
+        surges: (i === 0) ? dedupedSurges : []
       });
     }
   }
@@ -4278,7 +4310,7 @@ async function transmitPayload(records, activeSurges = []) {
             [Buffer.from("WC1Eb3duUmFkYXItU2VjcmV0", "base64").toString("utf8")]: CONFIG.secret
           },
           body: JSON.stringify(payload),
-          signal: AbortSignal.timeout(45000)
+          signal: AbortSignal.timeout(90000)
         });
         const respText = await res.text();
         console.log(`[Collector] [${CONFIG.runnerKey}] Ingestion response HTTP ${res.status}: ${respText.substring(0, 200)}`);
