@@ -49,19 +49,10 @@ function isBenignQuery(q) {
   return BENIGN_PATTERNS.test(q);
 }
 
-const HIGH_PRIORITY_SLUGS = new Set([
-  'ionos', 'battlefield', 'call-of-duty', 'fortnite', 'roblox', 'discord', 'steam',
-  'openai', 'chatgpt', 'netflix', 'youtube', 'spotify', 'playstation-network', 'xbox-live',
-  'ea', 'rockstar-games', 'epic-games', 'riot-games', 'amazon', 'cloudflare',
-  'spectrum', 'att', 'verizon', 't-mobile', 'comcast-xfinity',
-  'world-of-warcraft', 'battle-net', 'counter-strike-2', 'destiny-2', 'genshin-impact',
-  'the-sims-4', 'dead-by-daylight', 'pubg', 'ea-sports-fc', 'warframe', 'dota-2',
-  'final-fantasy-xiv', 'escape-from-tarkov', 'clash-of-clans', 'clash-royale',
-  'power-grid-utilities',
-  // Banking & Financial Services (No public statuspage, Cloudflare-shielded DD -> 100% Google Trends dependent)
-  'chase', 'bank-of-america', 'wells-fargo', 'citibank', 'capital-one', 'pnc', 'td-bank', 'chime',
-  'zelle', 'paypal', 'venmo', 'cash-app', 'fidelity', 'schwab', 'robinhood', 'coinbase'
-]);
+// Dynamic Event-Driven Engine: Deep Google Trends Explore is triggered dynamically 
+// by Broad Failure Vectors (e.g. "down", "outage") and external telemetry, preventing 
+// unnecessary static probes that delay runner results.
+const HIGH_PRIORITY_SLUGS = new Set();
 
 // Broad failure & breaking news query vectors monitored worldwide (dynamically synced from WordPress /targets failure_keywords)
 let BROAD_FAILURE_VECTORS = [
@@ -3294,7 +3285,16 @@ async function fetchGlobalTrendsRss() {
  * Batches target keywords into a single comparison probe for maximum speed and rich Top/Rising telemetry
  */
 async function probeGoogleTrendsExplore(browser, target, timeWindow = "now 1-H") {
-  const keywords = (target.keywords && target.keywords.length > 0) ? target.keywords : [target.slug];
+  const cleanTitle = (target.title || '').replace(/\s*\(.*?\)/g, '').trim();
+  const cleanSlug = target.slug.replace(/-/g, ' ').trim();
+  const dynamicProbeKws = [
+    `${cleanTitle} down`,
+    `${cleanTitle} outage`,
+    `${cleanSlug} down`,
+    ...(target.keywords || [])
+  ];
+  const uniqueKws = [...new Set(dynamicProbeKws.map(k => (k || '').trim()).filter(k => k.length >= 3))];
+  const chunk = uniqueKws.slice(0, 5);
   // Default to Worldwide (empty geo: "") or target-specific geo
   const geo = target.geo || "";
   const time = timeWindow || CONFIG.timeWindow;
@@ -3314,7 +3314,6 @@ async function probeGoogleTrendsExplore(browser, target, timeWindow = "now 1-H")
   const page = await context.newPage();
 
   try {
-    const chunk = keywords.slice(0, 5);
     const encodedChunk = chunk.map(k => encodeURIComponent(k)).join("%2C");
     const exploreBaseUrl = (geo && geo !== "GLOBAL" && geo !== "WORLDWIDE")
       ? `https://trends.google.com/explore?q=${encodedChunk}&geo=${encodeURIComponent(geo)}&date=${encodeURIComponent(time)}`
@@ -3847,6 +3846,13 @@ function evaluateTrendMatch(target, activeSurges, trendsHealth = "ok") {
     }
   }
 
+  for (const al of (target.aliases || [])) {
+    const a = (al || "").toLowerCase().trim();
+    if (a.length >= 3) {
+      candidatePhrases.add(a);
+    }
+  }
+
   const matchedSurges = [];
 
   for (const s of activeSurges) {
@@ -4349,9 +4355,13 @@ async function run() {
     // C. Search Trends Evaluation from Global RSS
     let trends = evaluateTrendMatch(target, allActiveSurges, trendsGlobalHealth);
 
-    // D. In-Session Deep Google Trends Explore (Worldwide) for elevated, high-priority or sample targets
-    const isHighPriority = HIGH_PRIORITY_SLUGS.has(target.slug);
-    const shouldExploreDeep = browser && (isHighPriority || dd.score >= 35 || statusScore >= 35 || trends.score >= 25 || (trends.matchCount || 0) > 0);
+    // D. Event-Driven Deep Google Trends Explore (Worldwide)
+    // ONLY launches if Broad Failure Vectors caught this platform trending for outages,
+    // or if external telemetry (Downdetector/Statuspage) detected disruption. Zero wasted browser queries!
+    const isTriggeredByBroadVectors = (trends.matchCount || 0) > 0 || trends.score >= 20;
+    const isTriggeredByExternalSignals = dd.score >= 35 || statusScore >= 35;
+    const isForcedOverride = HIGH_PRIORITY_SLUGS.has(target.slug);
+    const shouldExploreDeep = browser && (isTriggeredByBroadVectors || isTriggeredByExternalSignals || isForcedOverride);
     let deepBreakoutTerms = [];
     let deepTopQueries = [];
     let deepBreakoutQueries = [];
