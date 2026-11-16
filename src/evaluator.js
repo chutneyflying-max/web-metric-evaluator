@@ -29,7 +29,7 @@ const CONFIG = {
   runnerKey: "web-metric-runner",
   partition: parseInt(process.env.PARTITION_ID || "1", 10),
   totalPartitions: parseInt(process.env.TOTAL_PARTITIONS || "1", 10),
-  timeWindow: process.env.TIME_WINDOW || "now 1-d",
+  timeWindow: process.env.TIME_WINDOW || "now 1-H",
   userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 };
 
@@ -57,13 +57,16 @@ const HIGH_PRIORITY_SLUGS = new Set([
   'world-of-warcraft', 'battle-net', 'counter-strike-2', 'destiny-2', 'genshin-impact',
   'the-sims-4', 'dead-by-daylight', 'pubg', 'ea-sports-fc', 'warframe', 'dota-2',
   'final-fantasy-xiv', 'escape-from-tarkov', 'clash-of-clans', 'clash-royale',
-  'power-grid-utilities'
+  'power-grid-utilities',
+  // Banking & Financial Services (No public statuspage, Cloudflare-shielded DD -> 100% Google Trends dependent)
+  'chase', 'bank-of-america', 'wells-fargo', 'citibank', 'capital-one', 'pnc', 'td-bank', 'chime',
+  'zelle', 'paypal', 'venmo', 'cash-app', 'fidelity', 'schwab', 'robinhood', 'coinbase'
 ]);
 
 // Broad failure & breaking news query vectors monitored worldwide (8 vectors combined)
 const BROAD_FAILURE_VECTORS = [
   "down", "outage", "not working", "login error",
-  "power outage", "blackout", "power cut", "crash"
+  "power outage", "blackout", "app down", "crash"
 ];
 
 const FALLBACK_SEED_TARGETS = [
@@ -3285,7 +3288,7 @@ async function fetchGlobalTrendsRss() {
  * In-Session Google Trends Explore Engine (Worldwide & Target-Specific)
  * Batches target keywords into a single comparison probe for maximum speed and rich Top/Rising telemetry
  */
-async function probeGoogleTrendsExplore(browser, target, timeWindow = "now 1-d") {
+async function probeGoogleTrendsExplore(browser, target, timeWindow = "now 1-H") {
   const keywords = (target.keywords && target.keywords.length > 0) ? target.keywords : [target.slug];
   // Default to Worldwide (empty geo: "") or target-specific geo
   const geo = target.geo || "";
@@ -3331,7 +3334,7 @@ async function probeGoogleTrendsExplore(browser, target, timeWindow = "now 1-d")
         const stripHeaders = (t) => t.replace(/^\)\]\}'[^\n]*\n/, '');
 
         const exploreReq = {
-          comparisonItem: chunk.map(k => ({ keyword: k, geo: geo || '', time: time || 'now 1-d' })),
+          comparisonItem: chunk.map(k => ({ keyword: k, geo: geo || '', time: time || 'now 1-H' })),
           category: 0,
           property: ''
         };
@@ -3482,7 +3485,7 @@ async function scanBroadWorldwideVectors(browser) {
     const encodedQ = BROAD_FAILURE_VECTORS
       .map(t => encodeURIComponent(t).replace(/%20/g, "%2520"))
       .join("%2C");
-    const modernUrl = `https://trends.google.com/explore?q=${encodedQ}&date=now%201-d`;
+    const modernUrl = `https://trends.google.com/explore?q=${encodedQ}&date=now%201-H`;
 
     await page.goto(modernUrl, { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {});
 
@@ -3570,7 +3573,7 @@ async function scanBroadWorldwideVectors(browser) {
           const result = await page.evaluate(async ({ chunk }) => {
             const stripHeaders = (t) => t.replace(/^\)\]\}'[^\n]*\n/, '');
             const exploreReq = {
-              comparisonItem: chunk.map(v => ({ keyword: v, geo: '', time: 'now 1-d' })),
+              comparisonItem: chunk.map(v => ({ keyword: v, geo: '', time: 'now 1-H' })),
               category: 0,
               property: ''
             };
@@ -4185,17 +4188,17 @@ async function enrichOutageTelemetry(browser, title, breakoutTerms = null) {
       };
     }
   } else {
-    summary = `Multi-vector telemetry and real-time user reports indicate active disruption for ${title}. Elevated error rates and server timeouts have been detected. Monitoring systems are actively tracking recovery status.`;
+    summary = `Real-time user problem reports indicate active service disruption for ${title}. Connection drops, loading delays, and elevated error rates have been reported. Operations and recovery status are being actively tracked.`;
   }
 
   const faqs = [
     {
       q: `Is ${title} currently down?`,
-      a: `Real-time telemetry and user reports show elevated disruption for ${title}. Automated probes have confirmed elevated latency and connection error spikes across multiple regions.`
+      a: `Real-time user reports and network checks show elevated disruption for ${title}. Increased latency and connection error spikes have been observed across multiple regions.`
     },
     {
       q: `What can I do if ${title} is not working?`,
-      a: `Check official service announcements, verify your local internet connection, restart the client application or browser session, and check DownRadar for live recovery status.`
+      a: `Check official service announcements, verify your local internet connection, restart the client application or browser session, and check IsDownNow for live recovery status.`
     }
   ];
 
