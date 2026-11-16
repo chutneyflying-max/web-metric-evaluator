@@ -33,13 +33,17 @@ const CONFIG = {
   userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 };
 
-const OUTAGE_PATTERNS = /\b(down|is down|server down|servers down|server outage|outage|outages|not working|crash|cannot login|login error|offline|error|failed|maintenance|blackout|blackouts|power cut|power cuts|electric outage|grid down|load shedding)\b/i;
+const OUTAGE_PATTERNS = /\b(down|is down|went down|servers? down|service down|network down|server outage|outage|outages|not working|crash|cannot login|login error|offline|error|failed|maintenance|blackout|blackouts|power cut|power cuts|electric outage|grid down|load shedding)\b/i;
 const STRICT_DISCOVERY_OUTAGE_PATTERNS = /\b(down|is down|went down|servers? down|service down|network down|portal down|system down|api down|app down|website down|platform down|outage|outages|blackout|blackouts|power cut|power cuts|electric outage|grid down|load shedding|not working|crash|crashes|crashing|cannot login|login error|login failed|offline|maintenance)\b/i;
-const BENIGN_PATTERNS = /\b(war|missile|airstrike|military|airspace|ceasefire|stock|stocks|nasdaq|dow jones|trading halted|market crash|crypto crash|shares|selloff|recession|pizza|pizzas|pizzeria|food|foods|restaurant|restaurants|cafe|coffee|burger|burgers|taco|tacos|sushi|pasta|noodle|noodles|sandwich|sandwiches|bakery|deli|menu|recipe|recipes|delivery|takeaway|takeout|near me|nearby|closest|grocery|groceries|supermarket|ice cream|dessert|donut|bagel|download|apk|lyrics|wallpaper|guide|installer|lottery|lotto|jackpot|result|results|draw|kerala|strike|strikes|tube strike|train strike|rail strike|walkout|protest|union|theft|robbery|police|arrest|arrested|suspect|crime|shooting|movie|trailer|box office|actor|actress|album|song|songs|dance|track|singer|artist|score|highlights|vs|match|gameplay|patch notes|update|sale|deal|price|buy|jacket|jackets|coat|coats|hoodie|pillow|pillows|feather|feathers|step down|steps down|stepping down|stepped down|stand down|stands down|standing down|stood down|go down|goes down|going down|went down|come down|comes down|coming down|sit down|sits down|sitting down|sat down|lay down|put down|puts down|calm down|calms down|upside down|hands down|run down|dress down|pinned down|pipe down|write down|breakdown of|breaking down|break down|breaks down|broken down|breakdown|lies down|lying down|lie down|touch down|touchdown|takedown|take down|countdown|closing down|shut down permanently|shutting down permanently|permanent closure|permanently closed|syndrome|syndroom|lansdown|finkley|black hawk down|watership down|47 meters down|spice go down|spice go down deh|seamus o shea|josh services|josh trade|best pizza|best pizza near|the lamb lies down on broadway|lamb lies broadway|experiencing partial)\b/i;
+const BENIGN_PATTERNS = /\b(war|missile|airstrike|military|airspace|ceasefire|stock|stocks|nasdaq|dow jones|trading halted|market crash|crypto crash|shares|selloff|recession|pizza|pizzas|pizzeria|food|foods|restaurant|restaurants|cafe|coffee|burger|burgers|taco|tacos|sushi|pasta|noodle|noodles|sandwich|sandwiches|bakery|deli|menu|recipe|recipes|delivery|takeaway|takeout|near me|nearby|closest|grocery|groceries|supermarket|ice cream|dessert|donut|bagel|download|apk|lyrics|wallpaper|guide|installer|lottery|lotto|jackpot|result|results|draw|kerala|strike|strikes|tube strike|train strike|rail strike|walkout|protest|union|theft|robbery|police|arrest|arrested|suspect|crime|shooting|movie|trailer|box office|actor|actress|album|song|songs|dance|track|singer|artist|score|highlights|vs|match|gameplay|patch notes|update|sale|deal|price|buy|jacket|jackets|coat|coats|hoodie|pillow|pillows|feather|feathers|step down|steps down|stepping down|stepped down|stand down|stands down|standing down|stood down|calm down|calms down|upside down|hands down|run down|dress down|pinned down|pipe down|write down|breakdown of|burn down|settle down|sit down|sits down|sitting down|sat down|lay down|put down|puts down|lies down|lying down|lie down|touch down|touchdown|takedown|take down|countdown|closing down|shut down permanently|shutting down permanently|permanent closure|permanently closed|syndrome|syndroom|lansdown|finkley|black hawk down|watership down|47 meters down|spice go down|spice go down deh|seamus o shea|josh services|josh trade|best pizza|best pizza near|the lamb lies down on broadway|lamb lies broadway|experiencing partial)\b/i;
 
 function isBenignQuery(q) {
   if (!q) return true;
   if (/\b(power outage|blackout|blackouts|power cut|power cuts|electric outage|grid down|grid outage|outage map)\b/i.test(q)) {
+    return false;
+  }
+  // Tech outage context protection: if query contains tech entity or server outage terms, never treat as benign
+  if (/\b(microsoft|outlook|office|teams|azure|aws|cloud|server|servers|website|app|portal|system|api|network|login|crash|crashing|offline|outage)\b/i.test(q)) {
     return false;
   }
   return BENIGN_PATTERNS.test(q);
@@ -4164,9 +4168,22 @@ async function enrichOutageTelemetry(browser, title, breakoutTerms = null) {
   ]);
 
   let summary = "";
+  let socialOptions = null;
   if (googleAiOverview && googleAiOverview.length >= 40) {
     const cleanAi = googleAiOverview.replace(/^AI (?:Mode|Overview)\s*(?:replied:)?/i, "").trim();
     summary = cleanAi.length > 400 ? cleanAi.substring(0, 400) + "..." : cleanAi;
+
+    // Parse multi-vibe social post options if Google AI Overview generated them
+    const opt1M = /Option 1[^:]*:[\s"']*([^\n"']+(?:\n[^\n"']+)?)/i.exec(googleAiOverview);
+    const opt2M = /Option 2[^:]*:[\s"']*([^\n"']+(?:\n[^\n"']+)?)/i.exec(googleAiOverview);
+    const opt3M = /Option 3[^:]*:[\s"']*([^\n"']+(?:\n[^\n"']+)?)/i.exec(googleAiOverview);
+    if (opt1M || opt2M || opt3M) {
+      socialOptions = {
+        funny: opt1M ? opt1M[1].replace(/["']/g, "").trim() : null,
+        sarcastic: opt2M ? opt2M[1].replace(/["']/g, "").trim() : null,
+        radar: opt3M ? opt3M[1].replace(/["']/g, "").trim() : null
+      };
+    }
   } else {
     summary = `Multi-vector telemetry and real-time user reports indicate active disruption for ${title}. Elevated error rates and server timeouts have been detected. Monitoring systems are actively tracking recovery status.`;
   }
@@ -4185,6 +4202,7 @@ async function enrichOutageTelemetry(browser, title, breakoutTerms = null) {
   return {
     ai_overview: {
       summary,
+      social_options: socialOptions,
       source: googleAiOverview ? "google_ai_overview_verified" : "multi_source_consensus"
     },
     community_discussions: discussions,
