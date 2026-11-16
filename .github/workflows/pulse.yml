@@ -2,13 +2,13 @@ name: Network Metric Evaluator Pulse
 
 on:
   schedule:
-    # Staggered offset schedule (runs at minute :04, :19, :34, :49)
+    # Staggered offset schedule
     - cron: '4,19,34,49 * * * *'
   workflow_dispatch:
 
 concurrency:
   group: metric-evaluator-pulse
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   audit:
