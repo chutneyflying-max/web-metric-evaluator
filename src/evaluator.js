@@ -63,10 +63,11 @@ const HIGH_PRIORITY_SLUGS = new Set([
   'zelle', 'paypal', 'venmo', 'cash-app', 'fidelity', 'schwab', 'robinhood', 'coinbase'
 ]);
 
-// Broad failure & breaking news query vectors monitored worldwide (8 vectors combined)
-const BROAD_FAILURE_VECTORS = [
+// Broad failure & breaking news query vectors monitored worldwide (dynamically synced from WordPress /targets failure_keywords)
+let BROAD_FAILURE_VECTORS = [
   "down", "outage", "not working", "login error",
-  "power outage", "blackout", "app down", "crash"
+  "downdetector", "maintenance", "failed", "crash",
+  "server down", "is down", "connection failed", "error code", "offline"
 ];
 
 const FALLBACK_SEED_TARGETS = [
@@ -3213,6 +3214,10 @@ async function fetchTargets() {
     });
     if (res.ok) {
       const data = await res.json();
+      if (Array.isArray(data.failure_keywords) && data.failure_keywords.length > 0) {
+        BROAD_FAILURE_VECTORS = data.failure_keywords;
+        console.log(`[Collector] [${CONFIG.runnerKey}] Synchronized ${BROAD_FAILURE_VECTORS.length} active failure keywords from WordPress.`);
+      }
       if (Array.isArray(data.session_cookies) && data.session_cookies.length > 0) {
         SESSION_COOKIES = data.session_cookies.map(c => ({
           name: c.name,
@@ -3482,7 +3487,7 @@ async function scanBroadWorldwideVectors(browser) {
 
   try {
     // 1. Attempt Modern Google Trends 8-Term Batched Explore
-    const encodedQ = BROAD_FAILURE_VECTORS
+    const encodedQ = BROAD_FAILURE_VECTORS.slice(0, 8)
       .map(t => encodeURIComponent(t).replace(/%20/g, "%2520"))
       .join("%2C");
     const modernUrl = `https://trends.google.com/explore?q=${encodedQ}&date=now%201-H`;
@@ -3562,10 +3567,10 @@ async function scanBroadWorldwideVectors(browser) {
         timeout: 15000
       }).catch(() => {});
 
-      const chunks = [
-        BROAD_FAILURE_VECTORS.slice(0, 5),
-        BROAD_FAILURE_VECTORS.slice(5, 8)
-      ];
+      const chunks = [];
+      for (let i = 0; i < BROAD_FAILURE_VECTORS.length; i += 5) {
+        chunks.push(BROAD_FAILURE_VECTORS.slice(i, i + 5));
+      }
 
       for (const chunk of chunks) {
         if (chunk.length === 0) continue;
