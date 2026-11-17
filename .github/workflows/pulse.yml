@@ -2,8 +2,11 @@ name: Network Metric Evaluator Pulse
 
 on:
   schedule:
-    # Staggered offset schedule
-    - cron: '4,19,34,49 * * * *'
+    # Staggered offset schedule (independent cron registrations to prevent single-line queue drops)
+    - cron: '4 * * * *'
+    - cron: '19 * * * *'
+    - cron: '34 * * * *'
+    - cron: '49 * * * *'
   workflow_dispatch:
 
 concurrency:
