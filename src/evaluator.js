@@ -4145,98 +4145,124 @@ async function fetchVideos(title) {
 }
 
 async function enrichOutageTelemetry(browser, title, breakoutTerms = null) {
-  console.log(`[Collector] [${CONFIG.runnerKey}] 🔬 Curating multi-source incident intelligence for "${title}"...`);
-  
-  let googleAiOverview = null;
-  if (browser && SESSION_COOKIES.length > 0) {
-    try {
-      const gCtx = await browser.newContext({
-        userAgent: CONFIG.userAgent,
-        locale: "en-US"
-      });
-      await gCtx.addCookies(SESSION_COOKIES).catch(() => {});
-      const gPage = await gCtx.newPage();
-      await gPage.goto(`https://www.google.com/search?q=${encodeURIComponent(title + ' down')}&hl=en`, {
-        waitUntil: "domcontentloaded",
-        timeout: 12000
-      }).catch(() => {});
-
-      if (!gPage.url().includes("/sorry/")) {
-        googleAiOverview = await gPage.evaluate(() => {
-          const h3Ai = Array.from(document.querySelectorAll("h3")).find(h => /AI (?:Mode|Overview)/i.test(h.innerText));
-          if (h3Ai) {
-            const parent = h3Ai.closest("div.MjjYud, [data-attrid], div[data-ved]") || h3Ai.parentElement?.parentElement;
-            return parent ? parent.innerText.trim() : null;
-          }
-          const container = document.querySelector("[data-target-container-id], [data-attrid='wa:/description']");
-          return container ? container.innerText.trim() : null;
+  try {
+    console.log(`[Collector] [${CONFIG.runnerKey}] 🔬 Curating multi-source incident intelligence for "${title}"...`);
+    
+    let googleAiOverview = null;
+    if (browser && SESSION_COOKIES.length > 0) {
+      try {
+        const gCtx = await browser.newContext({
+          userAgent: CONFIG.userAgent,
+          locale: "en-US"
         });
+        await gCtx.addCookies(SESSION_COOKIES).catch(() => {});
+        const gPage = await gCtx.newPage();
+        await gPage.goto(`https://www.google.com/search?q=${encodeURIComponent(title + ' down')}&hl=en`, {
+          waitUntil: "domcontentloaded",
+          timeout: 12000
+        }).catch(() => {});
+
+        if (!gPage.url().includes("/sorry/")) {
+          googleAiOverview = await gPage.evaluate(() => {
+            const h3Ai = Array.from(document.querySelectorAll("h3")).find(h => /AI (?:Mode|Overview)/i.test(h.innerText));
+            if (h3Ai) {
+              const parent = h3Ai.closest("div.MjjYud, [data-attrid], div[data-ved]") || h3Ai.parentElement?.parentElement;
+              return parent ? parent.innerText.trim() : null;
+            }
+            const container = document.querySelector("[data-target-container-id], [data-attrid='wa:/description']");
+            return container ? container.innerText.trim() : null;
+          });
+        }
+        await gCtx.close().catch(() => {});
+      } catch (_) {}
+    }
+
+    const [discussions, videos] = await Promise.all([
+      fetchDiscussions(title),
+      fetchVideos(title)
+    ]);
+
+    let summary = "";
+    let socialOptions = null;
+    const bTermsStr = Array.isArray(breakoutTerms)
+      ? breakoutTerms.join(" ")
+      : (typeof breakoutTerms === "string" ? breakoutTerms : "");
+    const combinedContext = (title + " " + bTermsStr).toLowerCase();
+    const isViralRumor = /(?:90\s*day|blackout\s*warning|grid\s*shutdown\s*rumor|is\s+the\s+.*real|fema\s*blackout)/i.test(combinedContext);
+
+    if (isViralRumor) {
+      summary = `Viral Rumor Debunked: Unsubstantiated claims circulating on social media claiming a 90-day nationwide power grid shutdown are false. Official agencies (including FEMA and the FCC) have confirmed that no power grid shutdown is scheduled. Monitored utilities and power networks are operating normally.`;
+    } else if (googleAiOverview && googleAiOverview.length >= 40) {
+      const cleanAi = googleAiOverview.replace(/^AI (?:Mode|Overview)\s*(?:replied:)?/i, "").trim();
+      summary = cleanAi.length > 400 ? cleanAi.substring(0, 400) + "..." : cleanAi;
+
+      // Parse multi-vibe social post options if Google AI Overview generated them
+      const opt1M = /Option 1[^:]*:[\s"']*([^\n"']+(?:\n[^\n"']+)?)/i.exec(googleAiOverview);
+      const opt2M = /Option 2[^:]*:[\s"']*([^\n"']+(?:\n[^\n"']+)?)/i.exec(googleAiOverview);
+      const opt3M = /Option 3[^:]*:[\s"']*([^\n"']+(?:\n[^\n"']+)?)/i.exec(googleAiOverview);
+      if (opt1M || opt2M || opt3M) {
+        socialOptions = {
+          funny: opt1M ? opt1M[1].replace(/["']/g, "").trim() : null,
+          sarcastic: opt2M ? opt2M[1].replace(/["']/g, "").trim() : null,
+          radar: opt3M ? opt3M[1].replace(/["']/g, "").trim() : null
+        };
       }
-      await gCtx.close().catch(() => {});
-    } catch (_) {}
+    } else {
+      summary = `Real-time user problem reports indicate active service disruption for ${title}. Connection drops, loading delays, and elevated error rates have been reported. Operations and recovery status are being actively tracked.`;
+    }
+
+    const faqs = isViralRumor ? [
+      {
+        q: `Is the 90-day power outage real?`,
+        a: `No. Viral claims alleging a 90-day nationwide power grid blackout have been debunked as misinformation by FEMA, the FCC, and independent fact-checkers.`
+      },
+      {
+        q: `Is the power grid currently operating normally?`,
+        a: `Yes. Regional electric utilities and power grid operations are running normally nationwide with zero scheduled blackouts.`
+      }
+    ] : [
+      {
+        q: `Is ${title} currently down?`,
+        a: `Real-time user reports and network checks show elevated disruption for ${title}. Increased latency and connection error spikes have been observed across multiple regions.`
+      },
+      {
+        q: `What can I do if ${title} is not working?`,
+        a: `Check official service announcements, verify your local internet connection, restart the client application or browser session, and check IsDownNow for live recovery status.`
+      }
+    ];
+
+    return {
+      ai_overview: {
+        summary,
+        social_options: socialOptions,
+        source: googleAiOverview ? "google_ai_overview_verified" : "multi_source_consensus"
+      },
+      community_discussions: discussions,
+      related_videos: videos,
+      faqs
+    };
+  } catch (err) {
+    console.warn(`[Collector] [${CONFIG.runnerKey}] ⚠️ Incident intelligence curation error for "${title}": ${err.message}`);
+    return {
+      ai_overview: {
+        summary: `Real-time user problem reports indicate active service disruption for ${title}. Connection drops, loading delays, and elevated error rates have been reported. Operations and recovery status are being actively tracked.`,
+        social_options: null,
+        source: "multi_source_consensus"
+      },
+      community_discussions: [],
+      related_videos: [],
+      faqs: [
+        {
+          q: `Is ${title} currently down?`,
+          a: `Real-time user reports and network checks show elevated disruption for ${title}. Increased latency and connection error spikes have been observed across multiple regions.`
+        },
+        {
+          q: `What can I do if ${title} is not working?`,
+          a: `Check official service announcements, verify your local internet connection, restart the client application or browser session, and check IsDownNow for live recovery status.`
+        }
+      ]
+    };
   }
-
-  const [discussions, videos] = await Promise.all([
-    fetchDiscussions(title),
-    fetchVideos(title)
-  ]);
-
-  let summary = "";
-  let socialOptions = null;
-  const combinedContext = (title + " " + (breakoutTerms || []).join(" ")).toLowerCase();
-  const isViralRumor = /(?:90\s*day|blackout\s*warning|grid\s*shutdown\s*rumor|is\s+the\s+.*real|fema\s*blackout)/i.test(combinedContext);
-
-  if (isViralRumor) {
-    summary = `Viral Rumor Debunked: Unsubstantiated claims circulating on social media claiming a 90-day nationwide power grid shutdown are false. Official agencies (including FEMA and the FCC) have confirmed that no power grid shutdown is scheduled. Monitored utilities and power networks are operating normally.`;
-  } else if (googleAiOverview && googleAiOverview.length >= 40) {
-    const cleanAi = googleAiOverview.replace(/^AI (?:Mode|Overview)\s*(?:replied:)?/i, "").trim();
-    summary = cleanAi.length > 400 ? cleanAi.substring(0, 400) + "..." : cleanAi;
-
-    // Parse multi-vibe social post options if Google AI Overview generated them
-    const opt1M = /Option 1[^:]*:[\s"']*([^\n"']+(?:\n[^\n"']+)?)/i.exec(googleAiOverview);
-    const opt2M = /Option 2[^:]*:[\s"']*([^\n"']+(?:\n[^\n"']+)?)/i.exec(googleAiOverview);
-    const opt3M = /Option 3[^:]*:[\s"']*([^\n"']+(?:\n[^\n"']+)?)/i.exec(googleAiOverview);
-    if (opt1M || opt2M || opt3M) {
-      socialOptions = {
-        funny: opt1M ? opt1M[1].replace(/["']/g, "").trim() : null,
-        sarcastic: opt2M ? opt2M[1].replace(/["']/g, "").trim() : null,
-        radar: opt3M ? opt3M[1].replace(/["']/g, "").trim() : null
-      };
-    }
-  } else {
-    summary = `Real-time user problem reports indicate active service disruption for ${title}. Connection drops, loading delays, and elevated error rates have been reported. Operations and recovery status are being actively tracked.`;
-  }
-
-  const faqs = isViralRumor ? [
-    {
-      q: `Is the 90-day power outage real?`,
-      a: `No. Viral claims alleging a 90-day nationwide power grid blackout have been debunked as misinformation by FEMA, the FCC, and independent fact-checkers.`
-    },
-    {
-      q: `Is the power grid currently operating normally?`,
-      a: `Yes. Regional electric utilities and power grid operations are running normally nationwide with zero scheduled blackouts.`
-    }
-  ] : [
-    {
-      q: `Is ${title} currently down?`,
-      a: `Real-time user reports and network checks show elevated disruption for ${title}. Increased latency and connection error spikes have been observed across multiple regions.`
-    },
-    {
-      q: `What can I do if ${title} is not working?`,
-      a: `Check official service announcements, verify your local internet connection, restart the client application or browser session, and check IsDownNow for live recovery status.`
-    }
-  ];
-
-  return {
-    ai_overview: {
-      summary,
-      social_options: socialOptions,
-      source: googleAiOverview ? "google_ai_overview_verified" : "multi_source_consensus"
-    },
-    community_discussions: discussions,
-    related_videos: videos,
-    faqs
-  };
 }
 
 async function transmitPayload(records, activeSurges = []) {
@@ -4480,7 +4506,11 @@ async function run() {
 
     let enrichment = null;
     if (displayScore >= 35 && !isGroundTruthRecovered) {
-      enrichment = await enrichOutageTelemetry(browser, target.title, allBreakouts);
+      try {
+        enrichment = await enrichOutageTelemetry(browser, target.title, allBreakouts);
+      } catch (err) {
+        console.warn(`[Collector] [${CONFIG.runnerKey}] Telemetry enrichment failed for ${target.title}: ${err.message}`);
+      }
     }
 
     records.push({
