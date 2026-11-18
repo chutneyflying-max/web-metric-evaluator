@@ -7,10 +7,28 @@
 import { chromium } from "playwright";
 
 const _prodFallback = Buffer.from("aHR0cHM6Ly9pc2Rvd25ub3cuY29tL3dwLWpzb24vZG93bnJhZGFyL3YxLw==", "base64").toString("utf8");
-const rawEndpoint = (process.env.WP_ENDPOINT || process.env.METRIC_ENDPOINT || _prodFallback).trim();
-const endpoint = (rawEndpoint.includes("trycloudflare.com") || !rawEndpoint.startsWith("http"))
-  ? _prodFallback
-  : rawEndpoint.replace(/\/?$/, "/");
+
+// Multi-Target Endpoints in Priority Order:
+// Target 1: Oracle VM 1 (Primary Cloud Target)
+// Target 2: Oracle VM 2 (Secondary Cloud Target)
+// Target 3: Windows Laptop / Live Production Site
+const endpointsList = [
+  "http://129.213.25.133/wp-json/downradar/v1/",
+  "http://150.136.211.135/wp-json/downradar/v1/"
+];
+
+const rawEndpoints = (process.env.WP_ENDPOINTS || process.env.WP_ENDPOINT || process.env.METRIC_ENDPOINT || "").trim();
+if (rawEndpoints) {
+  const parts = rawEndpoints.split(",").map(u => u.trim().replace(/\/?$/, "/")).filter(u => u.startsWith("http"));
+  for (const p of parts) {
+    if (!endpointsList.includes(p)) {
+      endpointsList.push(p);
+    }
+  }
+}
+if (!endpointsList.includes(_prodFallback)) {
+  endpointsList.push(_prodFallback);
+}
 
 const _sk = Buffer.from("RE9XTlJBREFSX0lOR0VTVF9TRUNSRVQ=", "base64").toString("utf8");
 const secret = (process.env.INGEST_KEY && process.env.INGEST_KEY.trim())
@@ -24,7 +42,8 @@ if (!secret) {
 }
 
 const CONFIG = {
-  endpoint,
+  endpoints: endpointsList,
+  endpoint: endpointsList[0],
   secret,
   runnerKey: "web-metric-runner",
   partition: parseInt(process.env.PARTITION_ID || "1", 10),
@@ -3191,49 +3210,54 @@ async function jitter(minMs = 200, maxMs = 500) {
 }
 
 async function fetchTargets() {
-  if (!CONFIG.endpoint || !CONFIG.secret) {
+  if (!CONFIG.secret || !CONFIG.endpoints || CONFIG.endpoints.length === 0) {
     return FALLBACK_SEED_TARGETS;
   }
-  const url = `${CONFIG.endpoint}targets?partition=${CONFIG.partition}&total_partitions=${CONFIG.totalPartitions}`;
-  try {
-    const res = await fetch(url, {
-      headers: {
-        "X-Telemetry-Auth": CONFIG.secret,
-        [Buffer.from("WC1Eb3duUmFkYXItU2VjcmV0", "base64").toString("utf8")]: CONFIG.secret
-      },
-      signal: AbortSignal.timeout(15000)
-    });
-    if (res.ok) {
-      const data = await res.json();
-      if (Array.isArray(data.failure_keywords) && data.failure_keywords.length > 0) {
-        BROAD_FAILURE_VECTORS = data.failure_keywords;
-        console.log(`[Collector] [${CONFIG.runnerKey}] Synchronized ${BROAD_FAILURE_VECTORS.length} active failure keywords from WordPress.`);
-      }
-      if (Array.isArray(data.session_cookies) && data.session_cookies.length > 0) {
-        SESSION_COOKIES = data.session_cookies.map(c => ({
-          name: c.name,
-          value: c.value,
-          domain: c.domain || ".google.com",
-          path: c.path || "/",
-          secure: Boolean(c.secure),
-          httpOnly: Boolean(c.httpOnly)
-        }));
-        console.log(`[Collector] [${CONFIG.runnerKey}] Loaded ${SESSION_COOKIES.length} active Google session cookies from cluster.`);
-      }
-      if (Array.isArray(data.targets)) {
-        if (data.targets.length > 0) {
-          console.log(`[Collector] [${CONFIG.runnerKey}] Retrieved ${data.targets.length} targets for shard ${CONFIG.partition}.`);
-          return data.targets;
-        } else {
-          console.log(`[Collector] [${CONFIG.runnerKey}] Partition ${CONFIG.partition} returned 0 targets authoritatively.`);
-          return [];
+
+  // Attempt targets retrieval in priority order (VM 1 -> VM 2 -> Laptop)
+  for (const ep of CONFIG.endpoints) {
+    const url = `${ep}targets?partition=${CONFIG.partition}&total_partitions=${CONFIG.totalPartitions}`;
+    try {
+      const res = await fetch(url, {
+        headers: {
+          "X-Telemetry-Auth": CONFIG.secret,
+          [Buffer.from("WC1Eb3duUmFkYXItU2VjcmV0", "base64").toString("utf8")]: CONFIG.secret
+        },
+        signal: AbortSignal.timeout(12000)
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.failure_keywords) && data.failure_keywords.length > 0) {
+          BROAD_FAILURE_VECTORS = data.failure_keywords;
+          console.log(`[Collector] [${CONFIG.runnerKey}] Synchronized ${BROAD_FAILURE_VECTORS.length} active failure keywords from ${ep}.`);
+        }
+        if (Array.isArray(data.session_cookies) && data.session_cookies.length > 0) {
+          SESSION_COOKIES = data.session_cookies.map(c => ({
+            name: c.name,
+            value: c.value,
+            domain: c.domain || ".google.com",
+            path: c.path || "/",
+            secure: Boolean(c.secure),
+            httpOnly: Boolean(c.httpOnly)
+          }));
+          console.log(`[Collector] [${CONFIG.runnerKey}] Loaded ${SESSION_COOKIES.length} active Google session cookies from ${ep}.`);
+        }
+        if (Array.isArray(data.targets)) {
+          if (data.targets.length > 0) {
+            console.log(`[Collector] [${CONFIG.runnerKey}] Retrieved ${data.targets.length} targets for shard ${CONFIG.partition} from ${ep}.`);
+            return data.targets;
+          } else {
+            console.log(`[Collector] [${CONFIG.runnerKey}] Partition ${CONFIG.partition} returned 0 targets authoritatively from ${ep}.`);
+            return [];
+          }
         }
       }
+    } catch (e) {
+      console.warn(`[Collector] Target retrieval from ${ep} failed (${e.message}), trying next target...`);
     }
-  } catch (e) {
-    console.warn(`[Collector] Could not fetch targets from API (${e.message}), using fallback targets.`);
   }
 
+  console.warn(`[Collector] All live endpoints failed target retrieval. Using local seed targets.`);
   const sliceSize = Math.ceil(FALLBACK_SEED_TARGETS.length / CONFIG.totalPartitions);
   const start = (CONFIG.partition - 1) * sliceSize;
   return FALLBACK_SEED_TARGETS.slice(start, start + sliceSize);
@@ -4323,38 +4347,41 @@ async function transmitPayload(records, activeSurges = []) {
     };
 
     const highImpact = batchRecords.filter(r => (r.signals.dd >= 35 || r.signals.trends >= 35 || r.signals.official >= 35 || r.signals.probe >= 35));
-    console.log(`[Collector] [${CONFIG.runnerKey}] Transmitting batch ${bIdx + 1}/${batches.length}: ${batchRecords.length} records (${highImpact.length} active disruptions, ${batchSurges.length} trends) to: ${CONFIG.endpoint}ingest`);
+    console.log(`[Collector] [${CONFIG.runnerKey}] Multi-Target Broadcast: transmitting batch ${bIdx + 1}/${batches.length}: ${batchRecords.length} records (${highImpact.length} active disruptions, ${batchSurges.length} trends) to ${CONFIG.endpoints.length} targets: [${CONFIG.endpoints.join(', ')}]...`);
 
-    let lastError = null;
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        const res = await fetch(`${CONFIG.endpoint}ingest`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Telemetry-Auth": CONFIG.secret,
-            [Buffer.from("WC1Eb3duUmFkYXItU2VjcmV0", "base64").toString("utf8")]: CONFIG.secret
-          },
-          body: JSON.stringify(payload),
-          signal: AbortSignal.timeout(90000)
-        });
-        const respText = await res.text();
-        console.log(`[Collector] [${CONFIG.runnerKey}] Ingestion response HTTP ${res.status}: ${respText.substring(0, 200)}`);
-        if (res.ok) {
-          lastError = null;
-          break;
+    const broadcastPromises = CONFIG.endpoints.map(async (ep) => {
+      let lastError = null;
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          const res = await fetch(`${ep}ingest`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-Telemetry-Auth": CONFIG.secret,
+              [Buffer.from("WC1Eb3duUmFkYXItU2VjcmV0", "base64").toString("utf8")]: CONFIG.secret
+            },
+            body: JSON.stringify(payload),
+            signal: AbortSignal.timeout(45000)
+          });
+          const respText = await res.text();
+          if (res.ok) {
+            console.log(`[Collector] [${CONFIG.runnerKey}] ✅ Ingestion to ${ep} OK (HTTP ${res.status}): ${respText.substring(0, 100)}`);
+            return { endpoint: ep, status: res.status, ok: true };
+          }
+          lastError = new Error(`HTTP ${res.status}: ${respText.substring(0, 100)}`);
+        } catch (e) {
+          lastError = e;
+          console.warn(`[Collector] [${CONFIG.runnerKey}] Ingestion to ${ep} attempt ${attempt} error: ${e.message}`);
         }
-        lastError = new Error(`Ingestion HTTP ${res.status}: ${respText.substring(0, 100)}`);
-      } catch (e) {
-        lastError = e;
-        console.warn(`[Collector] [${CONFIG.runnerKey}] Ingestion attempt ${attempt} error: ${e.message}`);
+        if (attempt < 2) await jitter(1000, 2000);
       }
-      if (attempt < 3) await jitter(2000, 4000);
-    }
+      console.warn(`[Collector] [${CONFIG.runnerKey}] ⚠️ Ingestion failed for ${ep}: ${lastError ? lastError.message : 'timeout'}`);
+      return { endpoint: ep, error: lastError ? lastError.message : 'unknown', ok: false };
+    });
 
-    if (lastError) {
-      throw lastError;
-    }
+    const results = await Promise.allSettled(broadcastPromises);
+    const successfulCount = results.filter(r => r.status === 'fulfilled' && r.value && r.value.ok).length;
+    console.log(`[Collector] [${CONFIG.runnerKey}] Batch ${bIdx + 1}/${batches.length} transmission complete: ${successfulCount}/${CONFIG.endpoints.length} targets successfully ingested.`);
   }
 }
 
