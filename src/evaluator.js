@@ -3483,15 +3483,15 @@ async function probeGoogleTrendsExplore(browser, target, timeWindow = "now 1-H")
 
       failureToBrandRatio = result.ratio;
 
-      // Parse GEO_MAP for top country epicenters
+      // Parse GEO_MAP for top country epicenters (strictly requiring active failure intent > 0)
       if (Array.isArray(result.geoData) && result.geoData.length > 0) {
         const sorted = [...result.geoData]
-          .filter(g => ((g.value?.[1] || 0) > 0 || (g.value?.[0] || 0) > 0))
-          .sort((a, b) => ((b.value?.[1] ?? b.value?.[0] ?? 0) - (a.value?.[1] ?? a.value?.[0] ?? 0)));
+          .filter(g => (g.value?.[1] || 0) > 0)
+          .sort((a, b) => ((b.value?.[1] || 0) - (a.value?.[1] || 0)));
         outageRegions = sorted.slice(0, 5).map(g => ({
           country_code: g.geoCode || '',
           country_name: g.geoName || '',
-          down_interest: g.value?.[1] ?? g.value?.[0] ?? 0
+          down_interest: g.value?.[1] || 0
         }));
       }
 
