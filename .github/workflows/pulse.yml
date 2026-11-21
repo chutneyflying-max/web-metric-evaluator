@@ -1,12 +1,12 @@
-name: Network Metric Evaluator Pulse
+name: Web Metric Evaluator
 
 on:
   schedule:
     # Staggered offset schedule (independent cron registrations to prevent single-line queue drops)
-    - cron: '4 * * * *'
-    - cron: '19 * * * *'
-    - cron: '34 * * * *'
-    - cron: '49 * * * *'
+    - cron: "4 * * * *"
+    - cron: "19 * * * *"
+    - cron: "34 * * * *"
+    - cron: "49 * * * *"
   workflow_dispatch:
 
 concurrency:
@@ -16,6 +16,7 @@ concurrency:
 jobs:
   audit:
     runs-on: ubuntu-latest
+    timeout-minutes: 3
     strategy:
       fail-fast: false
       matrix:
@@ -23,24 +24,20 @@ jobs:
     steps:
       - name: Checkout Source
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
 
       - name: Setup Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Cache Playwright Browsers
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-browsers-${{ runner.os }}-${{ hashFiles('package.json') }}
-          restore-keys: |
-            playwright-browsers-${{ runner.os }}-
-
-      - name: Install Dependencies & Headless Browser
+      - name: Install Dependencies
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
         run: |
-          npm install
-          npx playwright install chromium --with-deps
+          npm install --omit=dev --silent --no-audit --no-fund
 
       - name: Run Availability Audit for Shard ${{ matrix.partition }}
         env:
@@ -48,6 +45,7 @@ jobs:
           DOWNRADAR_INGEST_SECRET: ${{ secrets.DOWNRADAR_INGEST_SECRET }}
           PARTITION_ID: ${{ matrix.partition }}
           TOTAL_PARTITIONS: 4
-          TIME_WINDOW: 'now 1-H'
+          TIME_WINDOW: "now 1-H"
+          CHROME_PATH: "/usr/bin/google-chrome"
         run: |
           node src/evaluator.js
