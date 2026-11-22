@@ -3357,7 +3357,31 @@ async function probeGoogleTrendsExplore(browser, target, timeWindow = "now 1-H")
             }
           } catch (_) {}
         }
-        return { itemsByKeyword };
+
+        // Extract real-time geographic epicenter from Google Trends GEO_MAP widget
+        const geoWidget = exploreData.widgets?.find((w) => w.id === 'GEO_MAP');
+        let outageRegions = [];
+        if (geoWidget) {
+          try {
+            const geoRes = await fetch(
+              `/trends/api/widgetdata/comparedgeo?hl=en-US&tz=-330&req=${encodeURIComponent(
+                JSON.stringify(geoWidget.request)
+              )}&token=${encodeURIComponent(geoWidget.token)}`,
+              { credentials: 'include' }
+            );
+            if (geoRes.ok) {
+              const geoData = JSON.parse(stripHeaders(await geoRes.text()));
+              outageRegions = (geoData.default?.geoMapData || [])
+                .filter(g => (g.value?.[0] || 0) > 0)
+                .sort((a, b) => (b.value?.[0] || 0) - (a.value?.[0] || 0))
+                .slice(0, 5)
+                .map(g => g.geoName || g.geoCode)
+                .filter(Boolean);
+            }
+          } catch (_) {}
+        }
+
+        return { itemsByKeyword, outageRegions };
       }, { chunk, geo, time });
 
       for (const [kw, lists] of Object.entries(result.itemsByKeyword || {})) {
@@ -3448,6 +3472,7 @@ async function probeGoogleTrendsExplore(browser, target, timeWindow = "now 1-H")
     score: peakScore,
     breakoutQueries: uniqueBreakouts,
     topQueries: uniqueTopQueries,
+    outageRegions: (typeof result !== "undefined" && Array.isArray(result?.outageRegions)) ? result.outageRegions : [],
     confirmedErrors: [...new Set(confirmedErrors)]
   };
 }
@@ -4133,27 +4158,38 @@ async function enrichOutageTelemetry(browser, title, breakoutTerms = null) {
     console.log(`[Collector] [${CONFIG.runnerKey}] 🔬 Curating multi-source incident intelligence for "${title}"...`);
     
     let googleAiOverview = null;
-    if (browser && SESSION_COOKIES.length > 0) {
+    if (browser) {
       try {
         const gCtx = await browser.newContext({
           userAgent: CONFIG.userAgent,
-          locale: "en-US"
+          locale: "en-US",
+          viewport: { width: 1440, height: 900 }
         });
-        await gCtx.addCookies(SESSION_COOKIES).catch(() => {});
+        if (SESSION_COOKIES.length > 0) {
+          await gCtx.addCookies(SESSION_COOKIES).catch(() => {});
+        }
         const gPage = await gCtx.newPage();
         await gPage.goto(`https://www.google.com/search?q=${encodeURIComponent(title + ' down')}&hl=en`, {
           waitUntil: "domcontentloaded",
-          timeout: 12000
+          timeout: 10000
         }).catch(() => {});
+
+        try {
+          const consentBtn = gPage.locator('button:has-text("Accept all"), button:has-text("Reject all"), button:has-text("I agree"), button:has-text("Got it")').first();
+          if (await consentBtn.isVisible({ timeout: 1500 })) {
+            await consentBtn.click();
+            await gPage.waitForTimeout(400);
+          }
+        } catch (_) {}
 
         if (!gPage.url().includes("/sorry/")) {
           googleAiOverview = await gPage.evaluate(() => {
-            const h3Ai = Array.from(document.querySelectorAll("h3")).find(h => /AI (?:Mode|Overview)/i.test(h.innerText));
+            const h3Ai = Array.from(document.querySelectorAll("h3, div")).find(h => /AI (?:Mode|Overview)/i.test(h.innerText));
             if (h3Ai) {
               const parent = h3Ai.closest("div.MjjYud, [data-attrid], div[data-ved]") || h3Ai.parentElement?.parentElement;
               return parent ? parent.innerText.trim() : null;
             }
-            const container = document.querySelector("[data-target-container-id], [data-attrid='wa:/description']");
+            const container = document.querySelector("[data-target-container-id], [data-attrid='wa:/description'], div.kno-rdesc");
             return container ? container.innerText.trim() : null;
           });
         }
@@ -4380,149 +4416,157 @@ async function run() {
     return;
   }
 
-  console.log(`[Collector] Auditing ${targets.length} targets across Multi-Vector Telemetry Matrix...`);
+  console.log(`[Collector] Auditing ${targets.length} targets across Multi-Vector Telemetry Matrix (5-worker concurrency)...`);
   const t0 = Date.now();
   const records = [];
 
-  for (const target of targets) {
-    // A. Official Statuspage REST (Instant)
-    const statusRes = target.statuspage_url ? await evaluateStatuspage(target.statuspage_url) : { score: 0, health: "not_configured" };
-    const statusScore = statusRes.score;
+  const CONCURRENCY = 5;
+  for (let idx = 0; idx < targets.length; idx += CONCURRENCY) {
+    const chunk = targets.slice(idx, idx + CONCURRENCY);
+    const chunkRecords = await Promise.all(chunk.map(async (target) => {
+      // A. Official Statuspage REST (Instant)
+      const statusRes = target.statuspage_url ? await evaluateStatuspage(target.statuspage_url) : { score: 0, health: "not_configured" };
+      const statusScore = statusRes.score;
 
-    // B. Fast HTTP External Telemetry Probe (<100ms)
-    const _ddK = Buffer.from("ZG93bmRldGVjdG9yX3NsdWc=", "base64").toString("utf8");
-    const extSlug = target.ext_slug || target.dd_slug || target[_ddK] || (target.slug === 'chatgpt' ? 'openai' : target.slug);
-    const dd = await evaluateExternalTelemetry(extSlug);
+      // B. Fast HTTP External Telemetry Probe (<100ms)
+      const _ddK = Buffer.from("ZG93bmRldGVjdG9yX3NsdWc=", "base64").toString("utf8");
+      const extSlug = target.ext_slug || target.dd_slug || target[_ddK] || (target.slug === 'chatgpt' ? 'openai' : target.slug);
+      const dd = await evaluateExternalTelemetry(extSlug);
 
-    // C. Search Trends Evaluation from Broad 8-Keyword Vectors
-    let trends = evaluateTrendMatch(target, allActiveSurges, trendsGlobalHealth);
+      // C. Search Trends Evaluation from Broad 8-Keyword Vectors
+      let trends = evaluateTrendMatch(target, allActiveSurges, trendsGlobalHealth);
 
-    // D. Event-Driven Deep Playwright Explore (Worldwide)
-    // ONLY launches if service is disrupted: score >= 35 via broad Trends breakouts, external telemetry, or Statuspage
-    const isDisrupted = trends.score >= 35 || dd.score >= 35 || statusScore >= 35 || (trends.matchCount || 0) > 0;
-    const isForcedOverride = HIGH_PRIORITY_SLUGS.has(target.slug);
-    const shouldExploreDeep = browser && (isDisrupted || isForcedOverride);
-    let deepBreakoutTerms = [];
-    let deepTopQueries = [];
-    let deepBreakoutQueries = [];
+      // D. Event-Driven Deep Playwright Explore (Worldwide)
+      // ONLY launches if service is disrupted: score >= 35 via broad Trends breakouts, external telemetry, or Statuspage
+      const isDisrupted = trends.score >= 35 || dd.score >= 35 || statusScore >= 35 || (trends.matchCount || 0) > 0;
+      const isForcedOverride = HIGH_PRIORITY_SLUGS.has(target.slug);
+      const shouldExploreDeep = browser && (isDisrupted || isForcedOverride);
+      let deepBreakoutTerms = [];
+      let deepTopQueries = [];
+      let deepBreakoutQueries = [];
+      let deepOutageRegions = [];
 
-    if (shouldExploreDeep) {
-      const exploreRes = await probeGoogleTrendsExplore(browser, target, CONFIG.timeWindow);
-      if (exploreRes.score > trends.score) {
-        trends.score = exploreRes.score;
+      if (shouldExploreDeep) {
+        const exploreRes = await probeGoogleTrendsExplore(browser, target, CONFIG.timeWindow);
+        if (exploreRes.score > trends.score) {
+          trends.score = exploreRes.score;
+        }
+        deepTopQueries = exploreRes.topQueries || [];
+        deepBreakoutQueries = exploreRes.breakoutQueries || [];
+        deepOutageRegions = exploreRes.outageRegions || [];
+        if (exploreRes.breakoutQueries && exploreRes.breakoutQueries.length > 0) {
+          deepBreakoutTerms = exploreRes.breakoutQueries.map(b => `${b.query} (${b.traffic})`);
+          exploreRes.breakoutQueries.forEach(b => {
+            allActiveSurges.push({ title: b.query, traffic: b.traffic, geo: target.geo || 'GLOBAL', type: 'rising' });
+          });
+        }
+        if (exploreRes.topQueries && exploreRes.topQueries.length > 0) {
+          exploreRes.topQueries.forEach(t => {
+            allActiveSurges.push({ title: t.query, traffic: t.formattedValue || '+50%', geo: target.geo || 'GLOBAL', type: 'top' });
+          });
+        }
       }
-      deepTopQueries = exploreRes.topQueries || [];
-      deepBreakoutQueries = exploreRes.breakoutQueries || [];
-      if (exploreRes.breakoutQueries && exploreRes.breakoutQueries.length > 0) {
-        deepBreakoutTerms = exploreRes.breakoutQueries.map(b => `${b.query} (${b.traffic})`);
-        exploreRes.breakoutQueries.forEach(b => {
-          allActiveSurges.push({ title: b.query, traffic: b.traffic, geo: target.geo || 'GLOBAL', type: 'rising' });
-        });
+
+      // E. Google News Media Verification: Media is strictly secondary corroboration!
+      // Never allow an uncorroborated news blog post to trigger an outage score without telemetry disruption.
+      let probeScore = 0;
+      let probeHealth = "ok";
+
+      const hasTelemetryDisruption = (trends.score >= 35 || statusScore >= 35 || dd.score >= 35);
+      if (hasTelemetryDisruption) {
+        const news = await evaluateNewsSignal(target);
+        if (news.score >= 65) {
+          probeScore = news.score;
+          probeHealth = news.health;
+        }
       }
-      if (exploreRes.topQueries && exploreRes.topQueries.length > 0) {
-        exploreRes.topQueries.forEach(t => {
-          allActiveSurges.push({ title: t.query, traffic: t.formattedValue || '+50%', geo: target.geo || 'GLOBAL', type: 'top' });
-        });
+
+      // Fast Recovery Determination (Downdetector or Official Statuspage confirmed recovery from a prior outage)
+      const isDdRecovered = dd.health === "ok" && Boolean(dd.isRecovered);
+      const isOfficialResolved = Boolean(target.statuspage_url && statusRes.health === "ok" && statusRes.isResolved && statusScore === 0);
+      const isGroundTruthRecovered = isDdRecovered || isOfficialResolved;
+
+      // ASYMMETRIC RECOVERY:
+      // If Downdetector or Official Statuspage confirms recovery, immediately suppress the trailing Google Trends 1-hour window!
+      if (isGroundTruthRecovered) {
+        trends.score = 0;
       }
-    }
 
-    // E. Google News Media Verification: Media is strictly secondary corroboration!
-    // Never allow an uncorroborated news blog post to trigger an outage score without telemetry disruption.
-    let probeScore = 0;
-    let probeHealth = "ok";
+      const displayScore = isGroundTruthRecovered ? 0 : Math.max(dd.score, trends.score, statusScore, probeScore);
 
-    const hasTelemetryDisruption = (trends.score >= 35 || statusScore >= 35 || dd.score >= 35);
-    if (hasTelemetryDisruption) {
-      const news = await evaluateNewsSignal(target);
-      if (news.score >= 65) {
-        probeScore = news.score;
-        probeHealth = news.health;
+      // Normalizing reports count
+      const calculatedReports = displayScore === 0
+        ? 0
+        : (dd.reports > 0
+          ? dd.reports
+          : (statusScore >= 80 ? 450
+            : (displayScore >= 80 ? 550
+              : (displayScore >= 65 ? 320
+                : (displayScore >= 35 ? 120 : 0)))));
+
+      const reportSource = displayScore === 0
+        ? "nominal_baseline"
+        : (dd.reports > 0
+          ? "telemetry_rsc"
+          : (displayScore >= 35 ? "estimated_from_search_velocity" : "nominal_baseline"));
+
+      const historySeries = (dd.historySeries && dd.historySeries.length > 0)
+        ? dd.historySeries
+        : null;
+
+      const fallbackTelemetry = (dd.symptoms && dd.symptoms.length > 0)
+        ? { symptoms: dd.symptoms, cities: dd.cities }
+        : synthesizeSymptomsAndCities(target.slug, displayScore);
+
+      // CRITICAL: breakout_terms must ONLY contain actual search trends queries!
+      // NEVER append news headlines, alerts, or media timestamps into search breakouts.
+      const allBreakouts = isGroundTruthRecovered ? "" : [
+        trends.breakouts,
+        deepBreakoutTerms.join(", ")
+      ].filter(Boolean).join(" | ");
+
+      console.log(`  ✓ ${target.title} (${target.slug}): DD=${dd.score} (rep:${dd.reports}, rec:${isDdRecovered}), Trends=${trends.score}, Official=${statusScore}, Probe=${probeScore} -> Score: ${displayScore} (rep:${calculatedReports})`);
+
+      let enrichment = null;
+      if (displayScore >= 35 && !isGroundTruthRecovered) {
+        try {
+          enrichment = await enrichOutageTelemetry(browser, target.title, allBreakouts);
+        } catch (err) {
+          console.warn(`[Collector] [${CONFIG.runnerKey}] Telemetry enrichment failed for ${target.title}: ${err.message}`);
+        }
       }
-    }
 
-    // Fast Recovery Determination (Downdetector or Official Statuspage confirmed recovery from a prior outage)
-    const isDdRecovered = dd.health === "ok" && Boolean(dd.isRecovered);
-    const isOfficialResolved = Boolean(target.statuspage_url && statusRes.health === "ok" && statusRes.isResolved && statusScore === 0);
-    const isGroundTruthRecovered = isDdRecovered || isOfficialResolved;
-
-    // ASYMMETRIC RECOVERY:
-    // If Downdetector or Official Statuspage confirms recovery, immediately suppress the trailing Google Trends 1-hour window!
-    if (isGroundTruthRecovered) {
-      trends.score = 0;
-    }
-
-    const displayScore = isGroundTruthRecovered ? 0 : Math.max(dd.score, trends.score, statusScore, probeScore);
-
-    // Normalizing reports count
-    const calculatedReports = displayScore === 0
-      ? 0
-      : (dd.reports > 0
-        ? dd.reports
-        : (statusScore >= 80 ? 450
-          : (displayScore >= 80 ? 550
-            : (displayScore >= 65 ? 320
-              : (displayScore >= 35 ? 120 : 0)))));
-
-    const reportSource = displayScore === 0
-      ? "nominal_baseline"
-      : (dd.reports > 0
-        ? "telemetry_rsc"
-        : (displayScore >= 35 ? "estimated_from_search_velocity" : "nominal_baseline"));
-
-    const historySeries = (dd.historySeries && dd.historySeries.length > 0)
-      ? dd.historySeries
-      : null;
-
-    const fallbackTelemetry = (dd.symptoms && dd.symptoms.length > 0)
-      ? { symptoms: dd.symptoms, cities: dd.cities }
-      : synthesizeSymptomsAndCities(target.slug, displayScore);
-
-    // CRITICAL: breakout_terms must ONLY contain actual search trends queries!
-    // NEVER append news headlines, alerts, or media timestamps into search breakouts.
-    const allBreakouts = isGroundTruthRecovered ? "" : [
-      trends.breakouts,
-      deepBreakoutTerms.join(", ")
-    ].filter(Boolean).join(" | ");
-
-    console.log(`  ✓ ${target.title} (${target.slug}): DD=${dd.score} (rep:${dd.reports}, rec:${isDdRecovered}), Trends=${trends.score}, Official=${statusScore}, Probe=${probeScore} -> Score: ${displayScore} (rep:${calculatedReports})`);
-
-    let enrichment = null;
-    if (displayScore >= 35 && !isGroundTruthRecovered) {
-      try {
-        enrichment = await enrichOutageTelemetry(browser, target.title, allBreakouts);
-      } catch (err) {
-        console.warn(`[Collector] [${CONFIG.runnerKey}] Telemetry enrichment failed for ${target.title}: ${err.message}`);
-      }
-    }
-
-    records.push({
-      slug: target.slug,
-      title: target.title,
-      ground_truth_recovered: isGroundTruthRecovered,
-      is_recovered: isGroundTruthRecovered,
-      signals: {
-        dd: dd.score,
-        trends: trends.score,
-        official: statusScore,
-        probe: probeScore
-      },
-      fetch_health: {
-        dd: dd.health,
-        trends: trends.health || trendsGlobalHealth,
-        official: statusRes.health,
-        probe: probeHealth
-      },
-      report_source: reportSource,
-      breakout_terms: allBreakouts || null,
-      top_queries: deepTopQueries,
-      breakout_queries: deepBreakoutQueries,
-      report_count: calculatedReports,
-      baseline: dd.baseline || 0,
-      history_series: historySeries,
-      symptoms: fallbackTelemetry.symptoms,
-      cities: fallbackTelemetry.cities,
-      enrichment
-    });
+      return {
+        slug: target.slug,
+        title: target.title,
+        ground_truth_recovered: isGroundTruthRecovered,
+        is_recovered: isGroundTruthRecovered,
+        signals: {
+          dd: dd.score,
+          trends: trends.score,
+          official: statusScore,
+          probe: probeScore
+        },
+        fetch_health: {
+          dd: dd.health,
+          trends: trends.health || trendsGlobalHealth,
+          official: statusRes.health,
+          probe: probeHealth
+        },
+        report_source: reportSource,
+        breakout_terms: allBreakouts || null,
+        top_queries: deepTopQueries,
+        breakout_queries: deepBreakoutQueries,
+        outage_regions: deepOutageRegions,
+        report_count: calculatedReports,
+        baseline: dd.baseline || 0,
+        history_series: historySeries,
+        symptoms: fallbackTelemetry.symptoms,
+        cities: fallbackTelemetry.cities,
+        enrichment
+      };
+    }));
+    records.push(...chunkRecords);
   }
 
   if (browser) {
