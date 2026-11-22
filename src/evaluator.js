@@ -21,7 +21,7 @@ if (rawEndpoints) {
     }
   }
 }
-if (endpointsList.length === 0 && _prodFallback) {
+if (!endpointsList.includes(_prodFallback)) {
   endpointsList.push(_prodFallback);
 }
 
