@@ -3267,57 +3267,18 @@ async function fetchTargets() {
 }
 
 /**
- * Fast Google Search Suggest / Autocomplete Signal (<60ms)
- * Evaluates real-time user keystroke search velocity directly from Google autocomplete
- * 100% rate-limit free, zero browser overhead, verifies if users are actively typing '[service] down'
- */
-async function evaluateSuggestSignal(target) {
-  const cleanSlug = target.slug.replace(/-/g, " ").trim();
-  const cleanTitle = (target.title || "").replace(/\s*\(.*?\)/g, "").trim().toLowerCase();
-  const query = `${cleanTitle || cleanSlug} down`;
-  const url = `https://suggestqueries.google.com/complete/search?client=firefox&q=${encodeURIComponent(query)}`;
-
-  try {
-    const res = await fetch(url, {
-      headers: { "User-Agent": "Mozilla/5.0" },
-      signal: AbortSignal.timeout(2500)
-    });
-    if (!res.ok) return { score: 0, suggestion: "", health: "ok" };
-    const json = await res.json();
-    const suggestions = json[1] || [];
-    
-    // Tier 1: Definite outage search queries
-    const CRITICAL_SUGGEST_RE = /\b(down detector|downdetector|servers down|server down|server outage|outage today|is down today|downtime today|down in my area|down right now)\b/i;
-    const critMatch = suggestions.find(s => CRITICAL_SUGGEST_RE.test(s));
-    if (critMatch) {
-      return { score: 75, suggestion: critMatch, health: "suggest_spike" };
-    }
-
-    // Tier 2: Elevated operational disruption queries
-    const WARN_SUGGEST_RE = /\b(not working today|not working|downtime|server status|login error|login issues|connection error|service disruption|down map)\b/i;
-    const warnMatch = suggestions.find(s => WARN_SUGGEST_RE.test(s));
-    if (warnMatch) {
-      return { score: 55, suggestion: warnMatch, health: "suggest_elevated" };
-    }
-  } catch (_) {}
-  return { score: 0, suggestion: "", health: "ok" };
-}
-
-/**
  * In-Session Google Trends Explore Engine (Worldwide & Target-Specific)
- * Batches target keywords into a single comparison probe for maximum speed and rich Top/Rising telemetry
+ * Performs a 2-term comparison probe of '[service] down' vs '[service] outage'
+ * for maximum speed and rich Top/Rising telemetry and regional breakdown.
  */
 async function probeGoogleTrendsExplore(browser, target, timeWindow = "now 1-H") {
   const cleanTitle = (target.title || '').replace(/\s*\(.*?\)/g, '').trim();
   const cleanSlug = target.slug.replace(/-/g, ' ').trim();
-  const dynamicProbeKws = [
-    `${cleanTitle} down`,
-    `${cleanTitle} outage`,
-    `${cleanSlug} down`,
-    ...(target.keywords || [])
+  const primaryName = cleanTitle || cleanSlug;
+  const chunk = [
+    `${primaryName} down`,
+    `${primaryName} outage`
   ];
-  const uniqueKws = [...new Set(dynamicProbeKws.map(k => (k || '').trim()).filter(k => k.length >= 3))];
-  const chunk = uniqueKws.slice(0, 5);
   // Default to Worldwide (empty geo: "") or target-specific geo
   const geo = target.geo || "";
   const time = timeWindow || CONFIG.timeWindow;
@@ -4433,24 +4394,14 @@ async function run() {
     const extSlug = target.ext_slug || target.dd_slug || target[_ddK] || (target.slug === 'chatgpt' ? 'openai' : target.slug);
     const dd = await evaluateExternalTelemetry(extSlug);
 
-    // C. Tier 1 Fast Google Search Suggest Autocomplete Signal (<60ms)
-    const suggest = await evaluateSuggestSignal(target);
-
-    // D. Search Trends Evaluation from Broad Vectors & Google Suggest
+    // C. Search Trends Evaluation from Broad 8-Keyword Vectors
     let trends = evaluateTrendMatch(target, allActiveSurges, trendsGlobalHealth);
-    if (suggest.score > trends.score) {
-      trends.score = suggest.score;
-      trends.breakouts = suggest.suggestion;
-      trends.health = suggest.health;
-    }
 
-    // E. Event-Driven Tier 2 Deep Google Trends Explore (Worldwide)
-    // ONLY launches if Tier 1 (Suggest or Broad Vectors) caught an outage spike,
-    // or external telemetry (Downdetector/Statuspage) detected disruption. Zero wasted browser queries!
-    const isTriggeredByBroadVectors = (trends.matchCount || 0) > 0 || trends.score >= 20;
-    const isTriggeredByExternalSignals = dd.score >= 35 || statusScore >= 35;
+    // D. Event-Driven Deep Playwright Explore (Worldwide)
+    // ONLY launches if service is disrupted: score >= 35 via broad Trends breakouts, external telemetry, or Statuspage
+    const isDisrupted = trends.score >= 35 || dd.score >= 35 || statusScore >= 35 || (trends.matchCount || 0) > 0;
     const isForcedOverride = HIGH_PRIORITY_SLUGS.has(target.slug);
-    const shouldExploreDeep = browser && (isTriggeredByBroadVectors || isTriggeredByExternalSignals || isForcedOverride);
+    const shouldExploreDeep = browser && (isDisrupted || isForcedOverride);
     let deepBreakoutTerms = [];
     let deepTopQueries = [];
     let deepBreakoutQueries = [];
