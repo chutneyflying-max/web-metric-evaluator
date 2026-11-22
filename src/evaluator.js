@@ -48,12 +48,20 @@ const CONFIG = {
 };
 
 const OUTAGE_PATTERNS = /\b(down|is down|went down|servers? down|service down|network down|server outage|outage|outages|not working|crash|cannot login|login error|offline|error|failed|maintenance|blackout|blackouts|power cut|power cuts|electric outage|grid down|load shedding)\b/i;
-const STRICT_DISCOVERY_OUTAGE_PATTERNS = /\b(down|is down|went down|servers? down|service down|network down|portal down|system down|api down|app down|website down|platform down|outage|outages|blackout|blackouts|power cut|power cuts|electric outage|grid down|load shedding|not working|crash|crashes|crashing|cannot login|login error|login failed|offline|maintenance)\b/i;
-const BENIGN_PATTERNS = /\b(war|missile|airstrike|military|airspace|ceasefire|stock|stocks|nasdaq|dow jones|trading halted|market crash|crypto crash|shares|selloff|recession|pizza|pizzas|pizzeria|food|foods|restaurant|restaurants|cafe|coffee|burger|burgers|taco|tacos|sushi|pasta|noodle|noodles|sandwich|sandwiches|bakery|deli|menu|recipe|recipes|delivery|takeaway|takeout|near me|nearby|closest|grocery|groceries|supermarket|ice cream|dessert|donut|bagel|download|apk|lyrics|wallpaper|guide|installer|lottery|lotto|jackpot|result|results|draw|kerala|strike|strikes|tube strike|train strike|rail strike|walkout|protest|union|theft|robbery|police|arrest|arrested|suspect|crime|shooting|movie|trailer|box office|actor|actress|album|song|songs|dance|track|singer|artist|score|highlights|vs|match|gameplay|patch notes|update|sale|deal|price|buy|jacket|jackets|coat|coats|hoodie|pillow|pillows|feather|feathers|step down|steps down|stepping down|stepped down|stand down|stands down|standing down|stood down|calm down|calms down|upside down|hands down|run down|dress down|pinned down|pipe down|write down|breakdown of|burn down|settle down|sit down|sits down|sitting down|sat down|lay down|put down|puts down|lies down|lying down|lie down|touch down|touchdown|takedown|take down|countdown|closing down|shut down permanently|shutting down permanently|permanent closure|permanently closed|syndrome|syndroom|lansdown|finkley|black hawk down|watership down|47 meters down|spice go down|spice go down deh|seamus o shea|josh services|josh trade|best pizza|best pizza near|the lamb lies down on broadway|lamb lies broadway|experiencing partial|jay sean down|down with the sickness|way down we go|freida mcfadden|alec benjamin)\b/i;
+const STRICT_DISCOVERY_OUTAGE_PATTERNS = /\b(down|is down|went down|servers? down|service down|network down|portal down|system down|api down|app down|website down|platform down|outage|outages|blackout|blackouts|power cut|power cuts|electric outage|grid down|load shedding|not working|crash|crashes|crashing|cannot login|login error|login failed|offline|maintenance|error\s+code|gold price|gas price|oil price|silver price|crude oil|share price|stock price|stock market|stocks? down|shares? down|market crash|trading halted|selloff|prices?\s+(?:down|falling|drops?|plunging|soaring|drop)|why\s+.*\s+(?:down|falling|crashing|not\s+working|broken|price))\b/i;
+const BENIGN_PATTERNS = /\b(war|missile|airstrike|military|airspace|ceasefire|pizza|pizzas|pizzeria|food|foods|restaurant|restaurants|cafe|coffee|burger|burgers|taco|tacos|sushi|pasta|noodle|noodles|sandwich|sandwiches|bakery|deli|menu|recipe|recipes|delivery|takeaway|takeout|near me|nearby|closest|grocery|groceries|supermarket|ice cream|dessert|donut|bagel|download|apk|lyrics|wallpaper|guide|installer|lottery|lotto|jackpot|result|results|draw|kerala|strike|strikes|tube strike|train strike|rail strike|walkout|protest|union|theft|robbery|police|arrest|arrested|suspect|crime|shooting|movie|trailer|box office|actor|actress|album|song|songs|dance|track|singer|artist|score|highlights|vs|match|gameplay|patch notes|update|sale|deal|buy|jacket|jackets|coat|coats|hoodie|pillow|pillows|feather|feathers|step down|steps down|stepping down|stepped down|stand down|stands down|standing down|stood down|calm down|calms down|upside down|hands down|run down|dress down|pinned down|pipe down|write down|breakdown of|burn down|settle down|sit down|sits down|sitting down|sat down|lay down|put down|puts down|lies down|lying down|lie down|touch down|touchdown|takedown|take down|countdown|closing down|shut down permanently|shutting down permanently|permanent closure|permanently closed|syndrome|syndroom|lansdown|finkley|black hawk down|watership down|47 meters down|spice go down|spice go down deh|seamus o shea|josh services|josh trade|best pizza|best pizza near|the lamb lies down on broadway|lamb lies broadway|experiencing partial|jay sean down|down with the sickness|way down we go|freida mcfadden|alec benjamin)\b/i;
 
 function isBenignQuery(q) {
   if (!q) return true;
   if (/\b(power outage|blackout|blackouts|power cut|power cuts|electric outage|grid down|grid outage|outage map)\b/i.test(q)) {
+    return false;
+  }
+  // Allow Market, Commodity & Tech Pricing Drops
+  if (/\b(stock market|stocks? down|shares? down|market crash|trading halted|selloff|gold price|gas price|oil price|silver price|crude oil|share price|stock price|gpu price|ram price|prices?\s+(?:down|falling|drops?|plunging|drop))\b/i.test(q)) {
+    return false;
+  }
+  // Allow Diagnostic & Troubleshooting "Why" queries
+  if (/\bwhy\s+.*(?:down|not working|crash|offline|failed|falling|price)/i.test(q)) {
     return false;
   }
   if (BENIGN_PATTERNS.test(q)) {
@@ -71,11 +79,12 @@ function isBenignQuery(q) {
 // unnecessary static probes that delay runner results.
 const HIGH_PRIORITY_SLUGS = new Set();
 
-// Broad failure & breaking news query vectors monitored worldwide (dynamically synced from WordPress /targets failure_keywords)
+// Broad failure, diagnostic & market query vectors monitored worldwide (dynamically synced from WordPress /targets failure_keywords)
 let BROAD_FAILURE_VECTORS = [
   "down", "outage", "not working", "login error",
   "downdetector", "maintenance", "failed", "crash",
-  "server down", "is down", "connection failed", "error code", "offline"
+  "server down", "is down", "connection failed", "error code", "offline",
+  "why", "price"
 ];
 
 const FALLBACK_SEED_TARGETS = [
@@ -3489,8 +3498,13 @@ async function scanBroadWorldwideVectors(browser) {
   const page = await context.newPage();
 
   try {
-    // 1. Attempt Modern Google Trends 8-Term Batched Explore
-    const encodedQ = BROAD_FAILURE_VECTORS.slice(0, 8)
+    // 1. Attempt Modern Google Trends Batched Explore (Partition-distributed for full 15-vector coverage)
+    const batchSize = 8;
+    const offset = ((CONFIG.partition - 1) % 2) * batchSize;
+    const batchTerms = BROAD_FAILURE_VECTORS.slice(offset, offset + batchSize);
+    const activeTerms = batchTerms.length >= 3 ? batchTerms : BROAD_FAILURE_VECTORS.slice(0, batchSize);
+
+    const encodedQ = activeTerms
       .map(t => encodeURIComponent(t).replace(/%20/g, "%2520"))
       .join("%2C");
     const modernUrl = `https://trends.google.com/explore?q=${encodedQ}&date=now%201-H`;
