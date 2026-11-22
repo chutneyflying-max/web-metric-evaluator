@@ -34,10 +34,11 @@ jobs:
           node-version: 20
 
       - name: Install Dependencies
-        env:
-          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
         run: |
           npm install --omit=dev --silent --no-audit --no-fund
+          if [ ! -f /usr/bin/google-chrome ]; then
+            npx playwright install chromium
+          fi
 
       - name: Run Availability Audit for Shard ${{ matrix.partition }}
         env:

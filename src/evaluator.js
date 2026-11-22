@@ -4,18 +4,13 @@
  * Multi-vector ingestion: In-Session Google Trends Explore (Worldwide) + Statuspage REST + Fast HTTP Telemetry Probe
  */
 
+import fs from "fs";
 import { chromium } from "playwright";
 
 const _prodFallback = Buffer.from("aHR0cHM6Ly9pc2Rvd25ub3cuY29tL3dwLWpzb24vZG93bnJhZGFyL3YxLw==", "base64").toString("utf8");
 
-// Multi-Target Endpoints in Priority Order:
-// Target 1: Oracle VM 1 (Primary Cloud Target)
-// Target 2: Oracle VM 2 (Secondary Cloud Target)
-// Target 3: Windows Laptop / Live Production Site
-const endpointsList = [
-  "http://129.213.25.133/wp-json/downradar/v1/",
-  "http://150.136.211.135/wp-json/downradar/v1/"
-];
+// Multi-Target Endpoints (Configured dynamically via environment secrets)
+const endpointsList = [];
 
 const rawEndpoints = (process.env.WP_ENDPOINTS || process.env.WP_ENDPOINT || process.env.METRIC_ENDPOINT || "").trim();
 if (rawEndpoints) {
@@ -26,7 +21,7 @@ if (rawEndpoints) {
     }
   }
 }
-if (!endpointsList.includes(_prodFallback)) {
+if (endpointsList.length === 0 && _prodFallback) {
   endpointsList.push(_prodFallback);
 }
 
@@ -3509,62 +3504,66 @@ async function scanBroadWorldwideVectors(browser) {
       }
     } catch (_) {}
 
-    await page.waitForTimeout(2000);
+    await page.waitForTimeout(1500);
 
     let modernSuccess = false;
-    const hasPills = await page.evaluate(() => {
-      return document.querySelectorAll('button.dc3dBf, button[data-index]').length >= 4;
+    await page.evaluate(() => {
+      window.scrollTo(0, document.body.scrollHeight);
+    });
+    await page.waitForTimeout(1500);
+
+    const hasRelated = await page.evaluate(() => {
+      return !!document.querySelector('#related-searches');
     });
 
-    if (hasPills) {
-      await page.evaluate(() => {
-        const el = document.querySelector('.Jh24Ne') || document.documentElement;
-        el.scrollTop = el.scrollHeight;
-      });
-      await page.waitForTimeout(1000);
+    if (hasRelated) {
+      const scrapedItems = await page.evaluate(async () => {
+        const container = document.querySelector('#related-searches');
+        if (!container) return [];
+        const pills = Array.from(container.querySelectorAll('button.dc3dBf'));
+        const out = [];
 
-      for (const term of BROAD_FAILURE_VECTORS) {
-        try {
-          const btn = page.locator(`button[aria-label="${term}"]`).first();
-          if (await btn.count() > 0) {
-            await btn.click({ force: true });
-            await page.waitForTimeout(600);
+        for (const pill of pills) {
+          const seedTerm = pill.innerText.replace(/check\n?/i, '').trim();
+          pill.click();
+          await new Promise(r => setTimeout(r, 600));
 
-            const scraped = await page.evaluate(() => {
-              const tables = document.querySelectorAll('table');
-              const extract = (tbl) => {
-                if (!tbl) return [];
-                return Array.from(tbl.querySelectorAll('tbody tr, tr'))
-                  .map(tr => Array.from(tr.querySelectorAll('td, th')).map(c => c.innerText.trim()).filter(Boolean))
-                  .filter(r => r.length >= 2 && !r[0].includes('Query'));
-              };
-              return {
-                top: extract(tables[0]),
-                rising: extract(tables[1])
-              };
-            });
+          const tables = Array.from(container.querySelectorAll('table'));
+          const extract = (tbl) => {
+            if (!tbl) return [];
+            return Array.from(tbl.querySelectorAll('tbody tr, tr'))
+              .map(tr => Array.from(tr.querySelectorAll('td, th')).map(c => c.innerText.trim()).filter(Boolean))
+              .filter(r => r.length >= 2 && !r[0].includes('Query'));
+          };
 
-            for (const row of (scraped.rising || [])) {
-              const q = (row[1] || '').trim();
-              const traffic = row[2] || 'Breakout 🚀';
-              if (q && !isBenignQuery(q) && STRICT_DISCOVERY_OUTAGE_PATTERNS.test(q)) {
-                discoveredSurges.push({ title: q, traffic, geo: 'GLOBAL', type: 'rising', seed: term });
-              }
-            }
-
-            for (const row of (scraped.top || [])) {
-              const q = (row[1] || '').trim();
-              const traffic = row[2] || '+50%';
-              if (q && !isBenignQuery(q) && STRICT_DISCOVERY_OUTAGE_PATTERNS.test(q)) {
-                discoveredSurges.push({ title: q, traffic, geo: 'GLOBAL', type: 'top', seed: term });
-              }
-            }
-
-            if (scraped.rising?.length > 0 || scraped.top?.length > 0) {
-              modernSuccess = true;
+          const risingRows = tables[1] ? extract(tables[1]) : [];
+          for (const row of risingRows) {
+            const q = (row[1] || '').trim();
+            const traffic = row.find(c => /breakout|%|\+/i.test(c)) || 'Breakout 🚀';
+            if (q) {
+              out.push({ title: q, traffic, geo: 'GLOBAL', type: 'rising', seed: seedTerm });
             }
           }
-        } catch (_) {}
+
+          const topRows = tables[0] ? extract(tables[0]) : [];
+          for (const row of topRows) {
+            const q = (row[1] || '').trim();
+            const traffic = row.find(c => /breakout|%|\+/i.test(c)) || '+50%';
+            if (q) {
+              out.push({ title: q, traffic, geo: 'GLOBAL', type: 'top', seed: seedTerm });
+            }
+          }
+        }
+        return out;
+      });
+
+      for (const item of scrapedItems) {
+        if (!isBenignQuery(item.title) && STRICT_DISCOVERY_OUTAGE_PATTERNS.test(item.title)) {
+          discoveredSurges.push(item);
+        }
+      }
+      if (discoveredSurges.length > 0) {
+        modernSuccess = true;
       }
     }
 
@@ -4247,7 +4246,7 @@ async function enrichOutageTelemetry(browser, title, breakoutTerms = null) {
       },
       {
         q: `What can I do if ${title} is not working?`,
-        a: `Check official service announcements, verify your local internet connection, restart the client application or browser session, and check IsDownNow for live recovery status.`
+        a: `Check official service announcements, verify your local internet connection, restart the client application or browser session, and check official status page for live recovery status.`
       }
     ];
 
@@ -4278,7 +4277,7 @@ async function enrichOutageTelemetry(browser, title, breakoutTerms = null) {
         },
         {
           q: `What can I do if ${title} is not working?`,
-          a: `Check official service announcements, verify your local internet connection, restart the client application or browser session, and check IsDownNow for live recovery status.`
+          a: `Check official service announcements, verify your local internet connection, restart the client application or browser session, and check official status page for live recovery status.`
         }
       ]
     };
@@ -4392,10 +4391,36 @@ async function run() {
   console.log(`[Collector] Provisioning Playwright Chromium for Worldwide Trends & Error Extraction...`);
   let browser = null;
   try {
-    browser = await chromium.launch({
+    const launchArgs = [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--no-first-run',
+      '--no-zygote'
+    ];
+
+    const chromeCandidate = process.env.CHROME_PATH || '/usr/bin/google-chrome';
+    const launchOptions = {
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
-    });
+      args: launchArgs
+    };
+
+    if (chromeCandidate && fs.existsSync(chromeCandidate)) {
+      launchOptions.executablePath = chromeCandidate;
+    }
+
+    try {
+      browser = await chromium.launch(launchOptions);
+    } catch (launchErr) {
+      if (launchOptions.executablePath) {
+        console.warn(`[Collector] System Chrome launch failed (${launchErr.message}), falling back to bundled chromium...`);
+        delete launchOptions.executablePath;
+        browser = await chromium.launch(launchOptions);
+      } else {
+        throw launchErr;
+      }
+    }
 
     // Scan broad worldwide failure vectors to discover breaking global topics
     const broadSurges = await scanBroadWorldwideVectors(browser);
