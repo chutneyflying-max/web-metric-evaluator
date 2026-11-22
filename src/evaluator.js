@@ -55,7 +55,7 @@ const CONFIG = {
 
 const OUTAGE_PATTERNS = /\b(down|is down|went down|servers? down|service down|network down|server outage|outage|outages|not working|crash|cannot login|login error|offline|error|failed|maintenance|blackout|blackouts|power cut|power cuts|electric outage|grid down|load shedding|bad gateway|e\d{2,4}(?:[-_\s]*l\d+)?)\b/i;
 const STRICT_DISCOVERY_OUTAGE_PATTERNS = /\b(down|is down|went down|servers? down|service down|network down|portal down|system down|api down|app down|website down|platform down|outage|outages|blackout|blackouts|power cut|power cuts|electric outage|grid down|load shedding|not working|crash|crashes|crashing|cannot login|login error|login failed|offline|maintenance|error|errors|error code|bad gateway|e\d{2,4}(?:[-_\s]*l\d+)?)\b/i;
-const BENIGN_PATTERNS = /\b(war|missile|airstrike|military|airspace|ceasefire|stock|stocks|nasdaq|dow jones|trading halted|market crash|crypto crash|shares|selloff|recession|pizza|pizzas|pizzeria|food|foods|restaurant|restaurants|cafe|coffee|burger|burgers|taco|tacos|sushi|pasta|noodle|noodles|sandwich|sandwiches|bakery|deli|menu|recipe|recipes|delivery|takeaway|takeout|near me|nearby|closest|grocery|groceries|supermarket|ice cream|dessert|donut|bagel|download|apk|lyrics|wallpaper|guide|installer|lottery|lotto|jackpot|result|results|draw|kerala|strike|strikes|tube strike|train strike|rail strike|walkout|protest|union|theft|robbery|police|arrest|arrested|suspect|crime|shooting|movie|trailer|box office|actor|actress|album|song|songs|dance|track|singer|artist|score|highlights|vs|match|gameplay|patch notes|update|sale|deal|price|buy|jacket|jackets|coat|coats|hoodie|pillow|pillows|feather|feathers|step down|steps down|stepping down|stepped down|stand down|stands down|standing down|stood down|calm down|calms down|upside down|hands down|run down|dress down|pinned down|pipe down|write down|breakdown of|burn down|settle down|sit down|sits down|sitting down|sat down|lay down|put down|puts down|lies down|lying down|lie down|touch down|touchdown|takedown|take down|countdown|closing down|shut down permanently|shutting down permanently|permanent closure|permanently closed|syndrome|syndroom|lansdown|finkley|black hawk down|watership down|47 meters down|spice go down|spice go down deh|seamus o shea|josh services|josh trade|best pizza|best pizza near|the lamb lies down on broadway|lamb lies broadway|experiencing partial)\b/i;
+const BENIGN_PATTERNS = /\b(war|missile|airstrike|military|airspace|ceasefire|stock|stocks|nasdaq|dow jones|trading halted|market crash|crypto crash|shares|selloff|recession|pizza|pizzas|pizzeria|food|foods|restaurant|restaurants|cafe|coffee|burger|burgers|taco|tacos|sushi|pasta|noodle|noodles|sandwich|sandwiches|bakery|deli|menu|recipe|recipes|delivery|takeaway|takeout|near me|nearby|closest|grocery|groceries|supermarket|ice cream|dessert|donut|bagel|download|apk|lyrics|wallpaper|guide|installer|lottery|lotto|jackpot|result|results|draw|kerala|strike|strikes|tube strike|train strike|rail strike|walkout|protest|union|theft|robbery|police|arrest|arrested|suspect|crime|shooting|movie|trailer|box office|actor|actress|album|song|songs|dance|track|singer|artist|score|highlights|vs|match|gameplay|patch notes|update|sale|deal|price|buy|jacket|jackets|coat|coats|hoodie|pillow|pillows|feather|feathers|step down|steps down|stepping down|stepped down|stand down|stands down|standing down|stood down|calm down|calms down|upside down|hands down|run down|dress down|pinned down|pipe down|write down|breakdown of|burn down|settle down|sit down|sits down|sitting down|sat down|lay down|put down|puts down|lies down|lying down|lie down|touch down|touchdown|takedown|take down|countdown|closing down|shut down permanently|shutting down permanently|permanent closure|permanently closed|syndrome|syndroom|lansdown|finkley|black hawk down|watership down|47 meters down|spice go down|spice go down deh|seamus o shea|josh services|josh trade|best pizza|best pizza near|the lamb lies down on broadway|lamb lies broadway|experiencing partial|down to earth|down to the wire|down the drain|code not working|promo code|cheat code|coupon code|voucher code|redeem code|activation code)\b/i;
 
 function isBenignQuery(q) {
   if (!q) return true;
@@ -3654,9 +3654,7 @@ async function scanBroadWorldwideVectors(browser) {
     const encodedQ = corridorSeeds.slice(0, 8)
       .map(t => encodeURIComponent(t).replace(/%20/g, "%2520"))
       .join("%2C");
-    const modernUrl = corridorGeo
-      ? `https://trends.google.com/explore?q=${encodedQ}&geo=${encodeURIComponent(corridorGeo)}&date=now%201-H`
-      : `https://trends.google.com/explore?q=${encodedQ}&date=now%201-H`;
+    const modernUrl = `https://trends.google.com/explore?q=${encodedQ}&date=now%201-H`;
 
     await page.goto(modernUrl, { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {});
 
@@ -3683,10 +3681,14 @@ async function scanBroadWorldwideVectors(browser) {
 
       for (const term of corridorSeeds.slice(0, 8)) {
         try {
-          const btn = page.locator(`button[aria-label="${term}"]`).first();
+          const btn = page.locator('button.dc3dBf, div.dc3dBf, button[data-index]').filter({ hasText: new RegExp(`^\\s*(?:check\\s+)?${term}\\s*$`, 'i') }).first();
           if (await btn.count() > 0) {
             await btn.click({ force: true });
-            await page.waitForTimeout(600);
+            // Wait for cells to hydrate text
+            await page.waitForFunction(() => {
+              const cells = document.querySelectorAll('table tr td:nth-child(2)');
+              return cells.length > 0 && Array.from(cells).some(c => c.innerText.trim().length > 0);
+            }, { timeout: 3500 }).catch(() => {});
 
             const scraped = await page.evaluate(() => {
               const tables = document.querySelectorAll('table');
@@ -3698,7 +3700,7 @@ async function scanBroadWorldwideVectors(browser) {
               };
               return {
                 top: extract(tables[0]),
-                rising: extract(tables[1])
+                rising: extract(tables[1] || tables[0])
               };
             });
 
@@ -4005,6 +4007,10 @@ function evaluateTrendMatch(target, activeSurges, trendsHealth = "ok") {
   const candidatePhrases = new Set();
   if (slugClean.length >= 3) candidatePhrases.add(slugClean);
   if (rawTitle.length >= 3) candidatePhrases.add(rawTitle);
+  const parenMatch = (target.title || "").match(/\(([^)]+)\)/);
+  if (parenMatch && parenMatch[1].trim().length >= 2) {
+    candidatePhrases.add(parenMatch[1].toLowerCase().trim());
+  }
   
   for (const kw of (target.keywords || [])) {
     const k = kw.toLowerCase().trim();
@@ -4057,12 +4063,15 @@ function evaluateTrendMatch(target, activeSurges, trendsHealth = "ok") {
     const trafficStr = String(s.traffic || "");
     const isBreakout = /breakout|🚀/i.test(trafficStr);
     const trafficNum = parseInt(trafficStr.replace(/[^0-9]/g, ""), 10) || 0;
-    // Confirmed Breakout (>5000% velocity) or massive nationwide trending story (>= 50K searches) triggers outage score
-    if (isBreakout || trafficNum >= 50000) {
+    // Confirmed Breakout, percentage spike (>= 500% velocity), or massive volume (>= 50K) triggers outage score
+    if (isBreakout || trafficNum >= 1000 || trafficNum >= 50000) {
       bestScore = 80;
       bestMatch = s;
-    } else if (trafficNum >= 5000) {
+    } else if (trafficNum >= 300 || trafficNum >= 5000) {
       bestScore = 65;
+      bestMatch = s;
+    } else if (trafficNum >= 80) {
+      bestScore = 45;
       bestMatch = s;
     } else {
       bestScore = 20; // 1 single modest search surge capped at 20 (Nominal Baseline)
@@ -4423,7 +4432,7 @@ async function transmitPayload(records, activeSurges = []) {
     if (!norm || seenSurgeTitles.has(norm)) continue;
     seenSurgeTitles.add(norm);
     dedupedSurges.push(s);
-    if (dedupedSurges.length >= 50) break;
+    if (dedupedSurges.length >= 150) break;
   }
 
   const CHUNK_SIZE = 100;
@@ -4533,7 +4542,7 @@ async function run() {
     const broadSurges = await scanBroadWorldwideVectors(browser);
     if (broadSurges.length > 0) {
       console.log(`[Collector] Discovered ${broadSurges.length} regional failure breakout queries.`);
-      allActiveSurges.push(...broadSurges);
+      allActiveSurges.unshift(...broadSurges);
     }
   } catch (bErr) {
     console.warn(`[Collector] Playwright initialization warning: ${bErr.message}`);
