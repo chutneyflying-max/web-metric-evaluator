@@ -3676,7 +3676,7 @@ async function scanBroadWorldwideVectors(browser) {
 }
 
 async function evaluateStatuspage(url) {
-  if (!url) return { score: 0, health: "not_configured" };
+  if (!url) return { score: 0, health: "not_configured", isResolved: false };
   try {
     const res = await fetch(url, { signal: AbortSignal.timeout(4000) });
     if (res.ok) {
@@ -3688,7 +3688,9 @@ async function evaluateStatuspage(url) {
         if (sc >= 500) score = 100;
         else if (sc >= 400) score = 80;
         else if (sc >= 300) score = 35;
-        return { score, health: "ok", indicator: json.result.status_overall.status, isResolved: score === 0 };
+        const incidents = Array.isArray(json.result?.incidents) ? json.result.incidents : [];
+        const hasResolvedIncident = incidents.some(inc => (inc.status || '').toLowerCase() === 'resolved' || (inc.state || '').toLowerCase() === 'resolved');
+        return { score, health: "ok", indicator: json.result.status_overall.status, isResolved: score === 0 && hasResolvedIncident };
       }
       // Support Statuspage.io (Atlassian)
       const indicator = json.status?.indicator || "none";
@@ -3696,12 +3698,14 @@ async function evaluateStatuspage(url) {
       if (indicator === "critical") score = 100;
       else if (indicator === "major") score = 80;
       else if (indicator === "minor") score = 35;
-      return { score, health: "ok", indicator, isResolved: score === 0 };
+      const incidents = Array.isArray(json.incidents) ? json.incidents : (json.incident ? [json.incident] : []);
+      const hasResolvedIncident = incidents.some(inc => (inc.status || '').toLowerCase() === 'resolved');
+      return { score, health: "ok", indicator, isResolved: score === 0 && hasResolvedIncident };
     }
-    return { score: 0, health: `http_${res.status}` };
+    return { score: 0, health: `http_${res.status}`, isResolved: false };
   } catch (e) {
     const isTimeout = e.name === "TimeoutError" || (e.message && e.message.includes("timeout"));
-    return { score: 0, health: isTimeout ? "timeout" : "network_error" };
+    return { score: 0, health: isTimeout ? "timeout" : "network_error", isResolved: false };
   }
 }
 
@@ -4520,13 +4524,14 @@ async function run() {
         }
       }
 
-      // Fast Recovery Determination (Downdetector or Official Statuspage confirmed recovery from a prior outage)
+      // Fast Recovery Determination (Downdetector confirmed recovery from a prior outage without active search outbreak)
       const isDdRecovered = dd.health === "ok" && Boolean(dd.isRecovered);
       const isOfficialResolved = Boolean(target.statuspage_url && statusRes.health === "ok" && statusRes.isResolved && statusScore === 0);
-      const isGroundTruthRecovered = isDdRecovered || isOfficialResolved;
+      const hasActiveSearchOutbreak = (trends.score >= 35 || (deepBreakoutQueries && deepBreakoutQueries.length >= 2) || (deepBreakoutTerms && deepBreakoutTerms.length >= 2));
+      const isGroundTruthRecovered = !hasActiveSearchOutbreak && isDdRecovered;
 
       // ASYMMETRIC RECOVERY:
-      // If Downdetector or Official Statuspage confirms recovery, immediately suppress the trailing Google Trends 1-hour window!
+      // If Downdetector confirms recovery and search is quiet, immediately suppress the trailing Google Trends 1-hour window!
       if (isGroundTruthRecovered) {
         trends.score = 0;
       }
@@ -4559,10 +4564,14 @@ async function run() {
 
       // CRITICAL: breakout_terms must ONLY contain actual search trends queries!
       // NEVER append news headlines, alerts, or media timestamps into search breakouts.
-      const allBreakouts = isGroundTruthRecovered ? "" : [
+      const formattedBreakouts = [
         trends.breakouts,
         deepBreakoutTerms.join(", ")
       ].filter(Boolean).join(" | ");
+
+      const allBreakouts = (isGroundTruthRecovered && (!deepBreakoutTerms || deepBreakoutTerms.length === 0))
+        ? ""
+        : formattedBreakouts;
 
       console.log(`  ✓ ${target.title} (${target.slug}): DD=${dd.score} (rep:${dd.reports}, rec:${isDdRecovered}), Trends=${trends.score}, Official=${statusScore}, Probe=${probeScore} -> Score: ${displayScore} (rep:${calculatedReports})`);
 
