@@ -4538,15 +4538,16 @@ async function run() {
 
       const displayScore = isGroundTruthRecovered ? 0 : Math.max(dd.score, trends.score, statusScore, probeScore);
 
-      // Normalizing reports count
+      // Normalizing reports count: require corroborated multi-vector or statuspage evidence
       const calculatedReports = displayScore === 0
         ? 0
         : (dd.reports > 0
           ? dd.reports
           : (statusScore >= 80 ? 450
-            : (displayScore >= 80 ? 550
-              : (displayScore >= 65 ? 320
-                : (displayScore >= 35 ? 120 : 0)))));
+            : (statusScore >= 50 ? 200
+              : (displayScore >= 80 ? (deepBreakoutTerms.length >= 3 ? 350 : 80)
+                : (displayScore >= 65 ? (deepBreakoutTerms.length >= 2 ? 180 : 45)
+                  : (displayScore >= 35 ? 25 : 0))))));
 
       const reportSource = displayScore === 0
         ? "nominal_baseline"
