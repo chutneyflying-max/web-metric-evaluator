@@ -3486,18 +3486,21 @@ async function probeGoogleTrendsExplore(browser, target, timeWindow = "now 1-H")
  * Combines 8 failure vectors in high-speed batches (Modern 8-term Explore UI + In-Session API fallback)
  */
 async function scanBroadWorldwideVectors(browser) {
+  let health = null;
   const discoveredSurges = [];
-  const context = await browser.newContext({
-    userAgent: CONFIG.userAgent,
-    locale: "en-US",
-    viewport: { width: 1440, height: 900 }
-  });
-  if (SESSION_COOKIES.length > 0) {
-    await context.addCookies(SESSION_COOKIES).catch(() => {});
-  }
-  const page = await context.newPage();
+  let context = null;
 
   try {
+    context = await browser.newContext({
+      userAgent: CONFIG.userAgent,
+      locale: "en-US",
+      viewport: { width: 1440, height: 900 }
+    });
+    if (SESSION_COOKIES.length > 0) {
+      await context.addCookies(SESSION_COOKIES).catch(() => {});
+    }
+    const page = await context.newPage();
+
     // 1. Attempt Modern Google Trends Batched Explore (Partition-distributed for full 15-vector coverage)
     const batchSize = 8;
     const offset = ((CONFIG.partition - 1) % 2) * batchSize;
@@ -3509,158 +3512,240 @@ async function scanBroadWorldwideVectors(browser) {
       .join("%2C");
     const modernUrl = `https://trends.google.com/explore?q=${encodedQ}&date=now%201-H`;
 
-    await page.goto(modernUrl, { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {});
-
+    let modernGotoResp = null;
+    let modernTimeout = false;
     try {
-      const consentBtn = page.locator('button:has-text("Accept all"), button:has-text("Reject all"), button:has-text("Got it"), button:has-text("OK, got it")').first();
-      if (await consentBtn.isVisible({ timeout: 1500 })) {
-        await consentBtn.click();
+      modernGotoResp = await page.goto(modernUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
+    } catch (gotoErr) {
+      if (gotoErr && (gotoErr.name === 'TimeoutError' || String(gotoErr.message).toLowerCase().includes('timeout'))) {
+        modernTimeout = true;
+      } else {
+        throw gotoErr;
       }
-    } catch (_) {}
+    }
 
-    await page.waitForTimeout(1500);
+    if (modernGotoResp && modernGotoResp.status() === 429) {
+      health = "rate_limited";
+    }
+
+    const currentUrl = page.url();
+    if (currentUrl.includes('/sorry/') || currentUrl.includes('google.com/sorry')) {
+      health = "challenge_unresolved";
+    } else {
+      const pageTitle = await page.title().catch(() => '');
+      if (/unusual traffic/i.test(pageTitle)) {
+        health = "challenge_unresolved";
+      } else {
+        const bodySnippet = await page.evaluate(() => document.body ? document.body.innerText.slice(0, 1000) : '').catch(() => '');
+        if (/unusual traffic/i.test(bodySnippet)) {
+          health = "challenge_unresolved";
+        }
+      }
+    }
+
+    if (!health && modernTimeout) {
+      health = "timeout";
+    }
 
     let modernSuccess = false;
-    await page.evaluate(() => {
-      window.scrollTo(0, document.body.scrollHeight);
-    });
-    await page.waitForTimeout(1500);
 
-    const hasRelated = await page.evaluate(() => {
-      return !!document.querySelector('#related-searches');
-    });
-
-    if (hasRelated) {
-      const scrapedItems = await page.evaluate(async () => {
-        const container = document.querySelector('#related-searches');
-        if (!container) return [];
-        const pills = Array.from(container.querySelectorAll('button.dc3dBf'));
-        const out = [];
-
-        for (const pill of pills) {
-          const seedTerm = pill.innerText.replace(/check\n?/i, '').trim();
-          pill.click();
-          await new Promise(r => setTimeout(r, 600));
-
-          const tables = Array.from(container.querySelectorAll('table'));
-          const extract = (tbl) => {
-            if (!tbl) return [];
-            return Array.from(tbl.querySelectorAll('tbody tr, tr'))
-              .map(tr => Array.from(tr.querySelectorAll('td, th')).map(c => c.innerText.trim()).filter(Boolean))
-              .filter(r => r.length >= 2 && !r[0].includes('Query'));
-          };
-
-          const risingRows = tables[1] ? extract(tables[1]) : [];
-          for (const row of risingRows) {
-            const q = (row[1] || '').trim();
-            const traffic = row.find(c => /breakout|%|\+/i.test(c)) || 'Breakout 🚀';
-            if (q) {
-              out.push({ title: q, traffic, geo: 'GLOBAL', type: 'rising', seed: seedTerm });
-            }
-          }
-
-          const topRows = tables[0] ? extract(tables[0]) : [];
-          for (const row of topRows) {
-            const q = (row[1] || '').trim();
-            const traffic = row.find(c => /breakout|%|\+/i.test(c)) || '+50%';
-            if (q) {
-              out.push({ title: q, traffic, geo: 'GLOBAL', type: 'top', seed: seedTerm });
-            }
-          }
+    if (health !== "rate_limited" && health !== "challenge_unresolved") {
+      try {
+        const consentBtn = page.locator('button:has-text("Accept all"), button:has-text("Reject all"), button:has-text("Got it"), button:has-text("OK, got it")').first();
+        if (await consentBtn.isVisible({ timeout: 1500 })) {
+          await consentBtn.click();
         }
-        return out;
+      } catch (_) {}
+
+      await page.waitForTimeout(1500);
+
+      await page.evaluate(() => {
+        window.scrollTo(0, document.body.scrollHeight);
+      });
+      await page.waitForTimeout(1500);
+
+      const hasRelated = await page.evaluate(() => {
+        return !!document.querySelector('#related-searches');
       });
 
-      for (const item of scrapedItems) {
-        if (!isBenignQuery(item.title) && STRICT_DISCOVERY_OUTAGE_PATTERNS.test(item.title)) {
-          discoveredSurges.push(item);
+      if (hasRelated) {
+        const scrapedItems = await page.evaluate(async () => {
+          const container = document.querySelector('#related-searches');
+          if (!container) return [];
+          const pills = Array.from(container.querySelectorAll('button.dc3dBf'));
+          const out = [];
+
+          for (const pill of pills) {
+            const seedTerm = pill.innerText.replace(/check\n?/i, '').trim();
+            pill.click();
+            await new Promise(r => setTimeout(r, 600));
+
+            const tables = Array.from(container.querySelectorAll('table'));
+            const extract = (tbl) => {
+              if (!tbl) return [];
+              return Array.from(tbl.querySelectorAll('tbody tr, tr'))
+                .map(tr => Array.from(tr.querySelectorAll('td, th')).map(c => c.innerText.trim()).filter(Boolean))
+                .filter(r => r.length >= 2 && !r[0].includes('Query'));
+            };
+
+            const risingRows = tables[1] ? extract(tables[1]) : [];
+            for (const row of risingRows) {
+              const q = (row[1] || '').trim();
+              const traffic = row.find(c => /breakout|%|\+/i.test(c)) || 'Breakout 🚀';
+              if (q) {
+                out.push({ title: q, traffic, geo: 'GLOBAL', type: 'rising', seed: seedTerm });
+              }
+            }
+
+            const topRows = tables[0] ? extract(tables[0]) : [];
+            for (const row of topRows) {
+              const q = (row[1] || '').trim();
+              const traffic = row.find(c => /breakout|%|\+/i.test(c)) || '+50%';
+              if (q) {
+                out.push({ title: q, traffic, geo: 'GLOBAL', type: 'top', seed: seedTerm });
+              }
+            }
+          }
+          return out;
+        });
+
+        for (const item of scrapedItems) {
+          if (!isBenignQuery(item.title) && STRICT_DISCOVERY_OUTAGE_PATTERNS.test(item.title)) {
+            discoveredSurges.push(item);
+          }
         }
-      }
-      if (discoveredSurges.length > 0) {
-        modernSuccess = true;
+        if (discoveredSurges.length > 0) {
+          modernSuccess = true;
+        }
       }
     }
 
     // 2. In-Session Batched API Fallback (runs if modern UI didn't produce queries)
-    if (!modernSuccess || discoveredSurges.length === 0) {
-      await page.goto("https://trends.google.com/trends/explore?hl=en-US", {
-        waitUntil: "domcontentloaded",
-        timeout: 15000
-      }).catch(() => {});
-
-      const chunks = [];
-      for (let i = 0; i < BROAD_FAILURE_VECTORS.length; i += 5) {
-        chunks.push(BROAD_FAILURE_VECTORS.slice(i, i + 5));
+    if ((!modernSuccess || discoveredSurges.length === 0) && health !== "rate_limited" && health !== "challenge_unresolved") {
+      let apiGotoResp = null;
+      let apiTimeout = false;
+      try {
+        apiGotoResp = await page.goto("https://trends.google.com/trends/explore?hl=en-US", {
+          waitUntil: "domcontentloaded",
+          timeout: 15000
+        });
+      } catch (aErr) {
+        if (aErr && (aErr.name === 'TimeoutError' || String(aErr.message).toLowerCase().includes('timeout'))) {
+          apiTimeout = true;
+        } else {
+          throw aErr;
+        }
       }
 
-      for (const chunk of chunks) {
-        if (chunk.length === 0) continue;
-        try {
-          const result = await page.evaluate(async ({ chunk }) => {
-            const stripHeaders = (t) => t.replace(/^\)\]\}'[^\n]*\n/, '');
-            const exploreReq = {
-              comparisonItem: chunk.map(v => ({ keyword: v, geo: '', time: 'now 1-H' })),
-              category: 0,
-              property: ''
-            };
-            const res = await fetch(`/trends/api/explore?hl=en-US&tz=-330&req=${encodeURIComponent(JSON.stringify(exploreReq))}`, { credentials: 'include' });
-            if (!res.ok) return { itemsByKeyword: {} };
-            const data = JSON.parse(stripHeaders(await res.text()));
-            const itemsByKeyword = {};
+      if (apiGotoResp && apiGotoResp.status() === 429) {
+        health = "rate_limited";
+      }
 
-            for (let i = 0; i < chunk.length; i++) {
-              const kw = chunk[i];
-              const widget = data.widgets?.find(w => w.id === `RELATED_QUERIES_${i}` || (chunk.length === 1 && w.id === 'RELATED_QUERIES'));
-              if (!widget) continue;
-              try {
-                const wRes = await fetch(`/trends/api/widgetdata/relatedsearches?hl=en-US&tz=-330&req=${encodeURIComponent(JSON.stringify(widget.request))}&token=${encodeURIComponent(widget.token)}`, { credentials: 'include' });
-                if (wRes.ok) {
-                  const wData = JSON.parse(stripHeaders(await wRes.text()));
-                  itemsByKeyword[kw] = {
-                    top: wData.default?.rankedList?.[0]?.rankedKeyword || [],
-                    rising: wData.default?.rankedList?.[1]?.rankedKeyword || []
-                  };
+      const apiPageUrl = page.url();
+      if (apiPageUrl.includes('/sorry/') || apiPageUrl.includes('google.com/sorry')) {
+        health = "challenge_unresolved";
+      } else {
+        const apiTitle = await page.title().catch(() => '');
+        if (/unusual traffic/i.test(apiTitle)) {
+          health = "challenge_unresolved";
+        }
+      }
+
+      if (!health && apiTimeout) {
+        health = "timeout";
+      }
+
+      if (health !== "rate_limited" && health !== "challenge_unresolved") {
+        const chunks = [];
+        for (let i = 0; i < BROAD_FAILURE_VECTORS.length; i += 5) {
+          chunks.push(BROAD_FAILURE_VECTORS.slice(i, i + 5));
+        }
+
+        for (const chunk of chunks) {
+          if (chunk.length === 0) continue;
+          try {
+            const result = await page.evaluate(async ({ chunk }) => {
+              const stripHeaders = (t) => t.replace(/^\)\]\}'[^\n]*\n/, '');
+              const exploreReq = {
+                comparisonItem: chunk.map(v => ({ keyword: v, geo: '', time: 'now 1-H' })),
+                category: 0,
+                property: ''
+              };
+              const res = await fetch(`/trends/api/explore?hl=en-US&tz=-330&req=${encodeURIComponent(JSON.stringify(exploreReq))}`, { credentials: 'include' });
+              if (res.status === 429) {
+                return { rateLimited: true, itemsByKeyword: {} };
+              }
+              if (!res.ok) return { itemsByKeyword: {} };
+              const data = JSON.parse(stripHeaders(await res.text()));
+              const itemsByKeyword = {};
+
+              for (let i = 0; i < chunk.length; i++) {
+                const kw = chunk[i];
+                const widget = data.widgets?.find(w => w.id === `RELATED_QUERIES_${i}` || (chunk.length === 1 && w.id === 'RELATED_QUERIES'));
+                if (!widget) continue;
+                try {
+                  const wRes = await fetch(`/trends/api/widgetdata/relatedsearches?hl=en-US&tz=-330&req=${encodeURIComponent(JSON.stringify(widget.request))}&token=${encodeURIComponent(widget.token)}`, { credentials: 'include' });
+                  if (wRes.status === 429) {
+                    return { rateLimited: true, itemsByKeyword };
+                  }
+                  if (wRes.ok) {
+                    const wData = JSON.parse(stripHeaders(await wRes.text()));
+                    itemsByKeyword[kw] = {
+                      top: wData.default?.rankedList?.[0]?.rankedKeyword || [],
+                      rising: wData.default?.rankedList?.[1]?.rankedKeyword || []
+                    };
+                  }
+                } catch (_) {}
+              }
+              return { itemsByKeyword };
+            }, { chunk });
+
+            if (result && result.rateLimited) {
+              health = "rate_limited";
+              break;
+            }
+
+            for (const [seedKw, lists] of Object.entries(result.itemsByKeyword || {})) {
+              for (const it of (lists.rising || [])) {
+                const q = (it.query || '').trim();
+                if (!q || isBenignQuery(q)) continue;
+                if (STRICT_DISCOVERY_OUTAGE_PATTERNS.test(q)) {
+                  discoveredSurges.push({
+                    title: q,
+                    traffic: it.formattedValue || 'Breakout 🚀',
+                    geo: 'GLOBAL',
+                    type: 'rising',
+                    seed: seedKw
+                  });
                 }
-              } catch (_) {}
-            }
-            return { itemsByKeyword };
-          }, { chunk });
-
-          for (const [seedKw, lists] of Object.entries(result.itemsByKeyword || {})) {
-            for (const it of (lists.rising || [])) {
-              const q = (it.query || '').trim();
-              if (!q || isBenignQuery(q)) continue;
-              if (STRICT_DISCOVERY_OUTAGE_PATTERNS.test(q)) {
-                discoveredSurges.push({
-                  title: q,
-                  traffic: it.formattedValue || 'Breakout 🚀',
-                  geo: 'GLOBAL',
-                  type: 'rising',
-                  seed: seedKw
-                });
+              }
+              for (const it of (lists.top || [])) {
+                const q = (it.query || '').trim();
+                if (!q || isBenignQuery(q)) continue;
+                if (STRICT_DISCOVERY_OUTAGE_PATTERNS.test(q)) {
+                  discoveredSurges.push({
+                    title: q,
+                    traffic: it.formattedValue || '+50%',
+                    geo: 'GLOBAL',
+                    type: 'top',
+                    seed: seedKw
+                  });
+                }
               }
             }
-            for (const it of (lists.top || [])) {
-              const q = (it.query || '').trim();
-              if (!q || isBenignQuery(q)) continue;
-              if (STRICT_DISCOVERY_OUTAGE_PATTERNS.test(q)) {
-                discoveredSurges.push({
-                  title: q,
-                  traffic: it.formattedValue || '+50%',
-                  geo: 'GLOBAL',
-                  type: 'top',
-                  seed: seedKw
-                });
-              }
-            }
-          }
-          await page.waitForTimeout(300);
-        } catch (_) {}
+            await page.waitForTimeout(300);
+          } catch (_) {}
+        }
       }
     }
-  } catch (_) {
+  } catch (e) {
+    if (!health) {
+      health = "error";
+    }
   } finally {
-    await context.close().catch(() => {});
+    if (context) {
+      await context.close().catch(() => {});
+    }
   }
 
   const uniqueSurges = [];
@@ -3672,7 +3757,12 @@ async function scanBroadWorldwideVectors(browser) {
       uniqueSurges.push(s);
     }
   }
-  return uniqueSurges;
+
+  if (!health) {
+    health = uniqueSurges.length > 0 ? "deep_ok" : "ok";
+  }
+
+  return { surges: uniqueSurges, health };
 }
 
 async function evaluateStatuspage(url) {
@@ -4403,7 +4493,7 @@ async function run() {
   const targets = await fetchTargets();
 
   let allActiveSurges = [];
-  const trendsGlobalHealth = "ok";
+  let trendsGlobalHealth = "browser_unavailable";
 
   // Tier 1 Playwright: In-Session Google Trends Worldwide Explore across Broad Failure Vectors
   console.log(`[Collector] Provisioning Playwright Chromium for Worldwide Trends & Error Extraction...`);
@@ -4441,13 +4531,19 @@ async function run() {
     }
 
     // Scan broad worldwide failure vectors to discover breaking global topics
-    const broadSurges = await scanBroadWorldwideVectors(browser);
-    if (broadSurges.length > 0) {
-      console.log(`[Collector] Discovered ${broadSurges.length} worldwide failure breakout queries.`);
-      allActiveSurges.push(...broadSurges);
+    const broadResult = await scanBroadWorldwideVectors(browser);
+    if (broadResult && Array.isArray(broadResult.surges)) {
+      if (broadResult.surges.length > 0) {
+        console.log(`[Collector] Discovered ${broadResult.surges.length} worldwide failure breakout queries.`);
+        allActiveSurges.push(...broadResult.surges);
+      }
+      trendsGlobalHealth = broadResult.health || "ok";
     }
   } catch (bErr) {
     console.warn(`[Collector] Playwright initialization warning: ${bErr.message}`);
+    if (!browser) {
+      trendsGlobalHealth = "browser_unavailable";
+    }
   }
 
   if (targets.length === 0) {
@@ -4501,11 +4597,6 @@ async function run() {
           deepBreakoutTerms = exploreRes.breakoutQueries.map(b => `${b.query} (${b.traffic})`);
           exploreRes.breakoutQueries.forEach(b => {
             allActiveSurges.push({ title: b.query, traffic: b.traffic, geo: target.geo || 'GLOBAL', type: 'rising' });
-          });
-        }
-        if (exploreRes.topQueries && exploreRes.topQueries.length > 0) {
-          exploreRes.topQueries.forEach(t => {
-            allActiveSurges.push({ title: t.query, traffic: t.formattedValue || '+50%', geo: target.geo || 'GLOBAL', type: 'top' });
           });
         }
       }
