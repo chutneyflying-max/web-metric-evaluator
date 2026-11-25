@@ -1,12 +1,12 @@
-name: Web Metric Evaluator
+name: Network Metric Evaluator Pulse
 
 on:
   schedule:
     # Staggered offset schedule (independent cron registrations to prevent single-line queue drops)
-    - cron: "4 * * * *"
-    - cron: "19 * * * *"
-    - cron: "34 * * * *"
-    - cron: "49 * * * *"
+    - cron: '5 * * * *'
+    - cron: '20 * * * *'
+    - cron: '35 * * * *'
+    - cron: '50 * * * *'
   workflow_dispatch:
 
 concurrency:
@@ -17,10 +17,6 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    strategy:
-      fail-fast: false
-      matrix:
-        partition: [1, 2, 3, 4]
     steps:
       - name: Checkout Source
         uses: actions/checkout@v4
@@ -40,13 +36,14 @@ jobs:
             npx playwright install chromium
           fi
 
-      - name: Run Availability Audit for Shard ${{ matrix.partition }}
+      - name: Run Availability Audit for Partition 2
         env:
           WP_ENDPOINT: ${{ secrets.WP_ENDPOINT }}
-          DOWNRADAR_INGEST_SECRET: ${{ secrets.DOWNRADAR_INGEST_SECRET }}
-          PARTITION_ID: ${{ matrix.partition }}
+          INGEST_KEY: ${{ secrets.INGEST_KEY || secrets.DOWNRADAR_INGEST_SECRET }}
+          DOWNRADAR_INGEST_SECRET: ${{ secrets.INGEST_KEY || secrets.DOWNRADAR_INGEST_SECRET }}
+          PARTITION_ID: 2
           TOTAL_PARTITIONS: 4
-          TIME_WINDOW: "now 1-H"
-          CHROME_PATH: "/usr/bin/google-chrome"
+          TIME_WINDOW: 'now 1-H'
+          CHROME_PATH: '/usr/bin/google-chrome'
         run: |
           node src/evaluator.js
