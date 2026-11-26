@@ -94,8 +94,10 @@ let BROAD_FAILURE_VECTORS = [
   "down", "outage", "not working", "login error",
   "downdetector", "maintenance", "failed", "crash",
   "server down", "is down", "connection failed", "error code", "offline",
-  "why", "price"
+  "price"
 ];
+
+let QUESTION_VECTORS = ["why", "when", "how", "what", "where", "who", "which", "can", "is"];
 
 const FALLBACK_SEED_TARGETS = [
   {
@@ -3248,6 +3250,10 @@ async function fetchTargets() {
           BROAD_FAILURE_VECTORS = data.failure_keywords;
           console.log(`[Collector] [${CONFIG.runnerKey}] Synchronized ${BROAD_FAILURE_VECTORS.length} active failure keywords from ${ep}.`);
         }
+        if (Array.isArray(data.question_keywords) && data.question_keywords.length > 0) {
+          QUESTION_VECTORS = data.question_keywords.map(k => String(k).toLowerCase().trim()).filter(Boolean);
+          console.log(`[Collector] [${CONFIG.runnerKey}] Synchronized ${QUESTION_VECTORS.length} Q&A question keywords from ${ep}.`);
+        }
         if (Array.isArray(data.session_cookies) && data.session_cookies.length > 0) {
           SESSION_COOKIES = data.session_cookies.map(c => ({
             name: c.name,
@@ -3503,7 +3509,9 @@ async function scanBroadWorldwideVectors(browser) {
     const s = (q || '').trim().toLowerCase();
     if (s.length < 12 || s.split(/\s+/).length < 3) return false;
     if (/^(13 reasons why|dee why|arti why|why not|why is|why women kill|why did i get married)\b/i.test(s)) return false;
-    return /^(why|when|how)\b/i.test(s) || ['why', 'when', 'how'].includes((seed || '').toLowerCase());
+    const sl = (seed || '').toLowerCase();
+    if (QUESTION_VECTORS.includes(sl)) return true;
+    return QUESTION_VECTORS.some(kw => s.startsWith(kw + ' '));
   };
   let context = null;
 
@@ -3676,9 +3684,10 @@ async function scanBroadWorldwideVectors(browser) {
       }
 
       if (health !== "rate_limited" && health !== "challenge_unresolved") {
+        const combinedVectors = [...new Set([...BROAD_FAILURE_VECTORS, ...QUESTION_VECTORS])];
         const chunks = [];
-        for (let i = 0; i < BROAD_FAILURE_VECTORS.length; i += 5) {
-          chunks.push(BROAD_FAILURE_VECTORS.slice(i, i + 5));
+        for (let i = 0; i < combinedVectors.length; i += 5) {
+          chunks.push(combinedVectors.slice(i, i + 5));
         }
 
         for (const chunk of chunks) {
