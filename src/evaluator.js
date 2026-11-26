@@ -51,6 +51,16 @@ const OUTAGE_PATTERNS = /\b(down|is down|went down|servers? down|service down|ne
 const STRICT_DISCOVERY_OUTAGE_PATTERNS = /\b(down|is down|went down|servers? down|service down|network down|portal down|system down|api down|app down|website down|platform down|outage|outages|blackout|blackouts|power cut|power cuts|electric outage|grid down|load shedding|not working|crash|crashes|crashing|cannot login|login error|login failed|offline|maintenance|error\s+code|gold price|gas price|oil price|silver price|crude oil|share price|stock price|stock market|stocks? down|shares? down|market crash|trading halted|selloff|prices?\s+(?:down|falling|drops?|plunging|soaring|drop)|why\s+.*\s+(?:down|falling|crashing|not\s+working|broken|price))\b/i;
 const BENIGN_PATTERNS = /\b(war|missile|airstrike|military|airspace|ceasefire|pizza|pizzas|pizzeria|food|foods|restaurant|restaurants|cafe|coffee|burger|burgers|taco|tacos|sushi|pasta|noodle|noodles|sandwich|sandwiches|bakery|deli|menu|recipe|recipes|delivery|takeaway|takeout|near me|nearby|closest|grocery|groceries|supermarket|ice cream|dessert|donut|bagel|download|apk|lyrics|wallpaper|guide|installer|lottery|lotto|jackpot|result|results|draw|kerala|strike|strikes|tube strike|train strike|rail strike|walkout|protest|union|theft|robbery|police|arrest|arrested|suspect|crime|shooting|movie|trailer|box office|actor|actress|album|song|songs|dance|track|singer|artist|score|highlights|vs|match|gameplay|patch notes|update|sale|deal|buy|jacket|jackets|coat|coats|hoodie|pillow|pillows|feather|feathers|step down|steps down|stepping down|stepped down|stand down|stands down|standing down|stood down|calm down|calms down|upside down|hands down|run down|dress down|pinned down|pipe down|write down|breakdown of|burn down|settle down|sit down|sits down|sitting down|sat down|lay down|put down|puts down|lies down|lying down|lie down|touch down|touchdown|takedown|take down|countdown|closing down|shut down permanently|shutting down permanently|permanent closure|permanently closed|syndrome|syndroom|lansdown|finkley|black hawk down|watership down|47 meters down|spice go down|spice go down deh|seamus o shea|josh services|josh trade|best pizza|best pizza near|the lamb lies down on broadway|lamb lies broadway|experiencing partial|jay sean down|down with the sickness|way down we go|freida mcfadden|alec benjamin)\b/i;
 
+const SERVICE_DISQUALIFIERS = {
+  rumble: /\b(my\s+hero\s+ultra\s+rumble|ultra\s+rumble|mhur|royal\s+rumble|pokemon\s+rumble|rumbleverse|ready\s+2\s+rumble|rumble\s+racing|rumble\s+stars)\b/i,
+};
+
+function isDisqualifiedForService(slug, q) {
+  if (!slug || !q) return false;
+  const rx = SERVICE_DISQUALIFIERS[slug];
+  return rx ? rx.test(q) : false;
+}
+
 function isBenignQuery(q) {
   if (!q) return true;
   if (/\b(power outage|blackout|blackouts|power cut|power cuts|electric outage|grid down|grid outage|outage map)\b/i.test(q)) {
@@ -3392,7 +3402,7 @@ async function probeGoogleTrendsExplore(browser, target, timeWindow = "now 1-H")
         // 1. Process Rising queries (breakouts)
         for (const item of (lists.rising || [])) {
           const query = (item.query || '').trim();
-          if (!query || isBenignQuery(query)) continue;
+          if (!query || isBenignQuery(query) || isDisqualifiedForService(target.slug, query)) continue;
 
           const isSpike = item.formattedValue === 'Breakout' || (typeof item.value === 'number' && item.value >= 1000);
 
@@ -3414,7 +3424,7 @@ async function probeGoogleTrendsExplore(browser, target, timeWindow = "now 1-H")
         // 2. Process Top queries
         for (const item of (lists.top || [])) {
           const query = (item.query || '').trim();
-          if (!query || isBenignQuery(query)) continue;
+          if (!query || isBenignQuery(query) || isDisqualifiedForService(target.slug, query)) continue;
 
           const errMatch = query.match(/\b(error\s?\d{3,5}|HTTP\s?\d{3}|code\s?\d{3,5}|ERR_[A-Z_]+|websocket_\w+|\d{4}[A-Z]?)\b/i);
           if (errMatch) {
@@ -3488,6 +3498,13 @@ async function probeGoogleTrendsExplore(browser, target, timeWindow = "now 1-H")
 async function scanBroadWorldwideVectors(browser) {
   let health = null;
   const discoveredSurges = [];
+  const discoveredQuestions = [];
+  const isDiagnosticQuestion = (q, seed = '') => {
+    const s = (q || '').trim().toLowerCase();
+    if (s.length < 12 || s.split(/\s+/).length < 3) return false;
+    if (/^(13 reasons why|dee why|arti why|why not|why is|why women kill|why did i get married)\b/i.test(s)) return false;
+    return /^(why|when|how)\b/i.test(s) || ['why', 'when', 'how'].includes((seed || '').toLowerCase());
+  };
   let context = null;
 
   try {
@@ -3610,6 +3627,9 @@ async function scanBroadWorldwideVectors(browser) {
         });
 
         for (const item of scrapedItems) {
+          if (isDiagnosticQuestion(item.title, item.seed)) {
+            discoveredQuestions.push(item);
+          }
           if (!isBenignQuery(item.title) && STRICT_DISCOVERY_OUTAGE_PATTERNS.test(item.title)) {
             discoveredSurges.push(item);
           }
@@ -3708,7 +3728,18 @@ async function scanBroadWorldwideVectors(browser) {
             for (const [seedKw, lists] of Object.entries(result.itemsByKeyword || {})) {
               for (const it of (lists.rising || [])) {
                 const q = (it.query || '').trim();
-                if (!q || isBenignQuery(q)) continue;
+                if (!q) continue;
+                if (isDiagnosticQuestion(q, seedKw)) {
+                  discoveredQuestions.push({
+                    title: q,
+                    traffic: it.formattedValue || 'Breakout 🚀',
+                    value: typeof it.value === 'number' ? it.value : 0,
+                    geo: 'GLOBAL',
+                    type: 'rising',
+                    seed: seedKw
+                  });
+                }
+                if (isBenignQuery(q)) continue;
                 if (STRICT_DISCOVERY_OUTAGE_PATTERNS.test(q)) {
                   discoveredSurges.push({
                     title: q,
@@ -3721,7 +3752,18 @@ async function scanBroadWorldwideVectors(browser) {
               }
               for (const it of (lists.top || [])) {
                 const q = (it.query || '').trim();
-                if (!q || isBenignQuery(q)) continue;
+                if (!q) continue;
+                if (isDiagnosticQuestion(q, seedKw)) {
+                  discoveredQuestions.push({
+                    title: q,
+                    traffic: it.formattedValue || '+50%',
+                    value: typeof it.value === 'number' ? it.value : 0,
+                    geo: 'GLOBAL',
+                    type: 'top',
+                    seed: seedKw
+                  });
+                }
+                if (isBenignQuery(q)) continue;
                 if (STRICT_DISCOVERY_OUTAGE_PATTERNS.test(q)) {
                   discoveredSurges.push({
                     title: q,
@@ -3758,11 +3800,21 @@ async function scanBroadWorldwideVectors(browser) {
     }
   }
 
+  const uniqueQuestions = [];
+  const seenQuestions = new Set();
+  for (const q of discoveredQuestions) {
+    const k = q.title.toLowerCase().trim();
+    if (!seenQuestions.has(k)) {
+      seenQuestions.add(k);
+      uniqueQuestions.push(q);
+    }
+  }
+
   if (!health) {
     health = uniqueSurges.length > 0 ? "deep_ok" : "ok";
   }
 
-  return { surges: uniqueSurges, health };
+  return { surges: uniqueSurges, questions: uniqueQuestions, health };
 }
 
 async function evaluateStatuspage(url) {
@@ -3973,7 +4025,7 @@ function evaluateTrendMatch(target, activeSurges, trendsHealth = "ok") {
 
   for (const s of activeSurges) {
     const rssTitle = s.title.toLowerCase().trim();
-    if (isBenignQuery(rssTitle)) continue;
+    if (isBenignQuery(rssTitle) || isDisqualifiedForService(target.slug, rssTitle)) continue;
 
     let matchedPhrase = null;
     for (const phrase of candidatePhrases) {
@@ -4392,7 +4444,7 @@ async function enrichOutageTelemetry(browser, title, breakoutTerms = null) {
   }
 }
 
-async function transmitPayload(records, activeSurges = []) {
+async function transmitPayload(records, activeSurges = [], activeQuestions = []) {
   // Stagger shard transmissions slightly to prevent simultaneous database lock contention on WordPress
   const shardStaggerMs = Math.max(0, (CONFIG.partition - 1) * 2000);
   if (shardStaggerMs > 0) {
@@ -4445,6 +4497,15 @@ async function transmitPayload(records, activeSurges = []) {
         type: s.type || "rising",
         seed_keyword: s.seed || null,
         source_channel: "playwright_explore_swarm",
+        source: CONFIG.runnerKey
+      })),
+      question_vectors: (bIdx === 0 ? (activeQuestions || []).slice(0, 35) : []).map(q => ({
+        query: q.title,
+        traffic: q.traffic,
+        value: q.value || 0,
+        geo: q.geo || "GLOBAL",
+        type: q.type || "rising",
+        seed_keyword: q.seed || "why",
         source: CONFIG.runnerKey
       }))
     };
@@ -4532,10 +4593,15 @@ async function run() {
 
     // Scan broad worldwide failure vectors to discover breaking global topics
     const broadResult = await scanBroadWorldwideVectors(browser);
+    var allActiveQuestions = [];
     if (broadResult && Array.isArray(broadResult.surges)) {
       if (broadResult.surges.length > 0) {
         console.log(`[Collector] Discovered ${broadResult.surges.length} worldwide failure breakout queries.`);
         allActiveSurges.push(...broadResult.surges);
+      }
+      if (Array.isArray(broadResult.questions) && broadResult.questions.length > 0) {
+        console.log(`[Collector] Discovered ${broadResult.questions.length} diagnostic question vectors.`);
+        allActiveQuestions.push(...broadResult.questions);
       }
       trendsGlobalHealth = broadResult.health || "ok";
     }
@@ -4548,8 +4614,8 @@ async function run() {
 
   if (targets.length === 0) {
     console.log(`[Collector] [${CONFIG.runnerKey}] 0 targets assigned to partition ${CONFIG.partition}. Completed.`);
-    if (allActiveSurges.length > 0) {
-      await transmitPayload([], allActiveSurges);
+    if (allActiveSurges.length > 0 || (typeof allActiveQuestions !== 'undefined' && allActiveQuestions.length > 0)) {
+      await transmitPayload([], allActiveSurges, typeof allActiveQuestions !== 'undefined' ? allActiveQuestions : []);
     }
     if (browser) await browser.close().catch(() => {});
     return;
@@ -4717,7 +4783,7 @@ async function run() {
   console.log(`[Collector] [${CONFIG.runnerKey}] Audited ${records.length} targets in ${elapsed}s!`);
 
   if (records.length > 0) {
-    await transmitPayload(records, allActiveSurges);
+    await transmitPayload(records, allActiveSurges, typeof allActiveQuestions !== 'undefined' ? allActiveQuestions : []);
   }
 }
 
