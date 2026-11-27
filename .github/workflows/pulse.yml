@@ -44,6 +44,8 @@ jobs:
           PARTITION_ID: 2
           TOTAL_PARTITIONS: 4
           TIME_WINDOW: 'now 1-H'
+          RUNNER_KEY: web-metric-runner
           CHROME_PATH: '/usr/bin/google-chrome'
         run: |
           node src/evaluator.js
+          node src/metric_supplement.js || true
